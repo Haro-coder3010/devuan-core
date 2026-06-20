@@ -16,7 +16,7 @@ Devuan es una distribución de Linux basada en Debian sin systemd; una base sól
 
 ## 🔬 Bitácora de Experimentos y Laboratorios
 Aquí iré subiendo el control de mis prácticas:
-* **[Core Baseline](./DevuanCore1.0):** Instalación exitosa de la base mínima de Devuan Excalibur con OpenRC.
+* **[DevuanCore1.0](./DevuanCore1.0):** Instalación exitosa de la base mínima de Devuan Excalibur con OpenRC.
 * *(Próximos experimentos aquí...)*
 
 ## 💬 Contribuciones y Críticas
