@@ -17,8 +17,8 @@ Devuan es una distribución de Linux basada en Debian sin systemd; una base sól
 ## 🔬 Bitácora de Experimentos y Laboratorios
 Aquí iré subiendo el control de mis prácticas:
 * **[DevuanCore1.0](./DevuanCore1.0):** Primer intento de instalar por debootstrap DevuanCore Minimal. 
-* **[Log de Errores](./Log-de-Errores):**
-* **[Resultado](./Esqueleto):**
+* **[Log de Errores](./Log-de-Errores):** Historial de errores, recopilación de errores del DevuanCore1.0
+* **[Resultado](./Esqueleto):** Esqueleto, log de los comandos, códigos y configuraciones que sí funcionaron. 
 
 
 ## 💬 Contribuciones y Críticas
