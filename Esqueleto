@@ -1,5 +1,5 @@
 ================================================================================
-DEVUAN ULTRA-MINIMAL CORE v3.0 - HARDENED WORKSTATION BASELINE
+DEVUAN ULTRA-MINIMAL CORE v1.0 - HARDENED WORKSTATION BASELINE
 RUTA DE INSTALACIÓN CERTIFICADA (PROD READY)
 OBJETIVO:
 Construir una instalación mínima, reproducible, auditable y endurecida de Devuan Excalibur utilizando una cadena de confianza criptográfica íntegra desde el bootstrap, eliminando por completo cualquier dependencia oculta de systemd.
