@@ -1,0 +1,374 @@
+========================================================
+DEVUAN CORE v3
+ANÁLISIS FORENSE DE FASE 3
+========================================================
+
+[INCIDENTE 1]
+----------------------------------------
+Síntoma:
+curl HTTPS contra deb.devuan.org falla.
+
+Error:
+SSL certificate subject mismatch
+
+Impacto:
+Imposible confiar en HTTPS del mirror.
+
+Conclusión:
+No bloquea la instalación porque debootstrap
+puede trabajar mediante HTTP y la validación
+real la realiza GPG.
+
+Estado:
+RESUELTO
+----------------------------------------
+
+[INCIDENTE 2]
+----------------------------------------
+Síntoma:
+GPG no puede descargar llaves.
+
+Error:
+DNS is not properly configured
+
+recepción del servidor de claves fallida:
+No existe el fichero o directorio
+
+Impacto:
+No se puede obtener la llave Devuan.
+
+Estado:
+NO RESUELTO
+----------------------------------------
+
+[INCIDENTE 3]
+----------------------------------------
+Hipótesis:
+Problema IPv6.
+
+Prueba:
+ping6 keyserver.ubuntu.com
+
+Resultado:
+Network unreachable
+
+Conclusión:
+IPv6 está roto.
+
+Estado:
+DESCARTADO COMO CAUSA PRINCIPAL
+----------------------------------------
+
+[INCIDENTE 4]
+----------------------------------------
+Hipótesis:
+Forzar IPv4.
+
+Prueba:
+gpg --keyserver hkp://185.125.188.27:80
+
+Resultado:
+Mismo error.
+
+Conclusión:
+No era un problema IPv6.
+
+Estado:
+DESCARTADO
+----------------------------------------
+
+[INCIDENTE 5]
+----------------------------------------
+Hallazgo:
+
+dirmngr reporta:
+
+error accessing /etc/resolv.conf
+
+No existe el fichero o directorio
+
+Conclusión:
+La causa real del fallo GPG es que
+dirmngr no puede acceder al resolv.conf.
+
+Estado:
+CAUSA RAÍZ IDENTIFICADA
+----------------------------------------
+
+[INCIDENTE 6]
+----------------------------------------
+Intento:
+Descarga manual del paquete devuan-keyring.
+
+Resultado:
+HTML de 153 bytes.
+
+Conclusión:
+URL obsoleta o redirección.
+
+Estado:
+FALLIDO
+----------------------------------------
+
+[INCIDENTE 7]
+----------------------------------------
+Intento:
+Descarga desde pkgmaster.
+
+Resultado:
+404 Not Found
+
+Estado:
+FALLIDO
+----------------------------------------
+
+[INCIDENTE 8]
+----------------------------------------
+Intento:
+Descarga desde mirror Debian.
+
+Resultado:
+404 Not Found
+
+Estado:
+FALLIDO
+----------------------------------------
+
+[INCIDENTE 9]
+----------------------------------------
+Intento:
+debootstrap normal.
+
+Resultado:
+
+Release signed by unknown key
+
+Conclusión:
+La llave Devuan no existe en el keyring
+Debian utilizado por AntiX.
+
+Estado:
+FALLIDO
+----------------------------------------
+
+[INCIDENTE 10]
+----------------------------------------
+Corrección:
+
+Descarga de llave Devuan mediante:
+
+https://keyserver.ubuntu.com/pks/lookup
+
+Resultado:
+Llave obtenida.
+
+Fingerprint:
+
+9F8D6C74DE661075FD171BE3B3982868D104092C
+
+Estado:
+RESUELTO
+----------------------------------------
+
+[INCIDENTE 11]
+----------------------------------------
+Intento:
+
+debootstrap
+--include=systemd-standalone-sysusers
+
+Resultado:
+
+cron-daemon-common
+
+depends on
+
+systemd-standalone-sysusers
+
+Package not installed
+
+Conclusión:
+debootstrap no instaló realmente
+el paquete solicitado antes de cron.
+
+Estado:
+FALLIDO
+----------------------------------------
+
+[INCIDENTE 12]
+----------------------------------------
+Intento:
+Repetir bootstrap sobre árbol contaminado.
+
+Resultado:
+
+tar failed
+
+Conclusión:
+Sistema parcialmente desplegado.
+
+Estado:
+FALLIDO
+----------------------------------------
+
+[INCIDENTE 13]
+----------------------------------------
+Hallazgo:
+
+sda3 aparecía montado varias veces
+sobre /mnt/devuan.
+
+Impacto:
+Riesgo de corrupción y errores I/O.
+
+Corrección:
+Desmontaje completo y remontaje limpio.
+
+Estado:
+RESUELTO
+----------------------------------------
+
+[INCIDENTE 14]
+----------------------------------------
+Bootstrap normal vuelve a fallar
+por cron-daemon-common.
+
+Conclusión:
+cron es el verdadero bloqueador
+del bootstrap estándar.
+
+Estado:
+CONFIRMADO
+----------------------------------------
+
+[INCIDENTE 15]
+----------------------------------------
+Cambio estratégico:
+
+Uso de:
+
+--variant=minbase
+
+Resultado:
+cron deja de formar parte
+del conjunto base.
+
+Estado:
+RESUELTO
+----------------------------------------
+
+[INCIDENTE 16]
+----------------------------------------
+Primer intento minbase.
+
+Resultado:
+tar failed
+
+Causa:
+Residuos de instalación anterior.
+
+Estado:
+FALLIDO
+----------------------------------------
+
+[INCIDENTE 17]
+----------------------------------------
+Limpieza total del árbol raíz.
+
+Comando:
+find /mnt/devuan ...
+
+Resultado:
+Sistema limpio.
+
+Estado:
+RESUELTO
+----------------------------------------
+
+[INCIDENTE 18]
+----------------------------------------
+Reintento final:
+
+debootstrap
+--variant=minbase
+
+Resultado:
+
+I: Base system installed successfully
+
+Estado:
+ÉXITO DEFINITIVO
+----------------------------------------
+
+==========================================================================================================
+Estos errores son la recopilación del logs de errores encontrados durante la fase 0 - fase 3.
+
+===========================================================================================================
+Fase 4 y 5 sin errores. 
+===========================================================================================================
+Fase 6-10
+REPORTE DE AUDITORÍA Y ESTANDARIZACIÓN POR FASE
+FASE 6 — Utilidades Base y Herramientas de Diagnóstico
+Objetivo: Proveer un entorno de terminal funcional y auditable sin sobrecargar el espacio de usuario.
+
+Comando Ejecutado: apt install nano sudo bash-completion -y
+
+Comando Estandarizado (Futuro): ```bash
+apt install --no-install-recommends nano sudo bash-completion htop pciutils usbutils curl wget -y
+
+Estado: PASS [X]
+
+Análisis Técnico y Mejoras: La instalación original fue limpia y exitosa. Sin embargo, para cumplir con el estándar de una estación de administración completa, se añaden al comando base utilidades críticas de bajo impacto:
+
+htop: Para monitoreo interactivo del consumo de CPU y RAM.
+
+pciutils / usbutils: Vitales para la auditoría física del hardware (lspci, lsusb).
+
+curl / wget: Herramientas esenciales para la transferencia de datos y consumo de APIs desde la terminal.
+
+FASE 7 — Consolidación del Kernel y Microcódigo
+Objetivo: Desplegar el núcleo del sistema operativo y mitigar vulnerabilidades de hardware a nivel de silicio desde el arranque temprano.
+
+Comando Ejecutado: apt install linux-image-amd64 intel-microcode -y | update-initramfs -u -k all
+
+Estado: PASS [X]
+
+Análisis Técnico: El sistema detectó correctamente la jaula chroot (evitando levantar el demonio udevd prematuramente) y generó el Ramdisk inicial de forma exitosa (/boot/initrd.img-6.12.90+deb13.1-amd64). La inclusión explícita de intel-microcode garantiza que el procesador esté parcheado contra fallos de ejecución especulativa antes de ceder el control al espacio de usuario.
+
+FASE 8 — Sistema de Inicialización (OpenRC)
+Objetivo: Reemplazar el backend clásico de SysV por un gestor de servicios moderno basado en dependencias, asegurando cumplimiento POSIX estricto.
+
+Comando Ejecutado: apt install openrc -y | command -v rc-service | command -v rc-update
+
+Estado: PASS [X]
+
+Análisis Técnico: Se removió con éxito sysv-rc a favor de openrc (versión 0.56-1). La validación a través de command -v fue un éxito, retornando las rutas absolutas operativas (/usr/sbin/rc-service). Esto elimina el riesgo de invocaciones ciegas en entornos sin las variables $PATH completamente definidas.
+
+FASE 9 — Base del Sistema y Gestión de Hardware
+Objetivo: Extirpar la dependencia del ecosistema systemd sobre la gestión de asientos y dispositivos de entrada, consolidando elogind.
+
+Comando Ejecutado: apt install dbus elogind udev kmod -y
+
+Estado: PASS [X]
+
+Análisis Técnico: Fase crítica superada con excelencia. El gestor de paquetes purgó explícitamente libsystemd0 y mapeó libelogind0 junto con libpam-elogind. Esto garantiza que los dispositivos físicos (gestionados por udev y kmod) respondan a un bus de mensajes (dbus) totalmente independiente, preservando la pureza de OpenRC.
+
+FASE 10 — Arquitectura de Red Inalámbrica de Alto Rendimiento
+Objetivo: Proveer un stack de conectividad moderno, eliminando colisiones de servicios y optimizando el consumo para hardware Intel.
+
+Comando Estandarizado: ```bash
+apt install --no-install-recommends connman iwd iw -y
+rc-update add connman default
+
+Estado: PASS [X]
+
+Justificación Arquitectónica (El cambio a iwd): Se modificó la hoja de ruta original, descartando wpa_supplicant a favor de iwd (Intel Wireless Daemon). Esta decisión se fundamenta en las especificaciones del hardware subyacente (Procesador Intel Celeron):
+
+Afinidad de Hardware: Al ser desarrollado por Intel, iwd ofrece una comunicación más directa y nativa con los controladores de red físicos de esta placa.
+
+Eficiencia Extrema: Reduce la huella de memoria en el espacio de usuario a un fragmento mínimo en comparación con su predecesor.
+
+Estabilidad de Bus: Se elimina de raíz el "Bloqueo Fatal" documentado en SysV/OpenRC, donde wpa_supplicant intenta secuestrar la interfaz, colisionando con ConnMan. Ahora, ConnMan asume el rol de director absoluto, comunicándose con iwd en el backend sin superposición de permisos.
+
+
+===========================================================================================================
