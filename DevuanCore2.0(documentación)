@@ -1,0 +1,574 @@
+=============================================================================================================================
+
+DEVUAN CORE 2.0
+PROTOCOLO DE CONSTRUCCIÓN, VALIDACIÓN Y CERTIFICACIÓN
+
+VERSIÓN: 2.0 EXPERIMENTAL
+ESTADO: EN VALIDACIÓN
+
+REQUISITO PREVIO:
+Host Linux funcional (ej. antiX).
+Acceso root.
+Conectividad de red.
+Particionado preparado.
+
+OBJETIVO:
+Construir una instalación Devuan mínima, funcional, administrable y reproducible, 
+orientada a administración de sistemas, estaciones técnicas y servidores ligeros,
+eliminando dependencias ocultas de systemd desde el bootstrap.
+
+FILOSOFÍA DEL PROYECTO:
+Primero lograr que arranque.
+Después lograr que sea administrable.
+Finalmente lograr que sea reproducible.
+
+REGLA DE ORO:
+Ninguna fase será considerada CERTIFICADA hasta:
+1. Ejecutarse correctamente.
+2. Sobrevivir reinicios completos.
+3. Documentar errores encontrados.
+4. Documentar correcciones aplicadas.
+5. Poder reproducirse desde cero.
+
+Hasta entonces:
+[ESTADO]: EXPERIMENTAL
+
+=============================================================================================================================
+
+FASE 0 — AUDITORÍA Y CONECTIVIDAD DEL HOST
+Garantiza la sincronización temporal y la integridad de la red.
+
+[BASH]
+
+date && uname -a && curl -I http://deb.devuan.org
+
+[RESULTADO ESPERADO]:
+-> Fecha actual correcta.
+-> HTTP/1.1 200 OK. Sin conectividad = BLOCKER.
+
+[RESULTADO]
+
+sáb 13 jun 2026 20:37:51 CST
+Linux Antix 6.6.119-antix.1-amd64-smp #2 SMP PREEMPT_DYNAMIC Sun Dec 28 20:03:05 EST 2025 x86_64 GNU/Linux
+HTTP/1.1 200 OK
+Date: Sun, 14 Jun 2026 02:38:18 GMT
+Server: Apache/2.4.58 (Ubuntu)
+Last-Modified: Sun, 14 Jun 2026 01:58:01 GMT
+ETag: "734-6542d0a29596c"
+Accept-Ranges: bytes
+Content-Length: 1844
+Vary: Accept-Encoding
+Cache-Control: max-age=1800, public
+Content-Type: text/html
+
+=============================================================================================================================
+
+FASE 1 — DEPENDENCIAS DEL HOST
+Instala las herramientas necesarias en el sistema anfitrión para orquestar el entorno raíz.
+
+[BASH]
+
+sudo apt update && sudo apt install -y debootstrap arch-test curl wget ca-certificates gnupg
+
+[BASH]
+
+debootstrap --version
+
+[RESULTADO ESPERADO]:
+-> Instalación limpia sin errores.
+-> Versión de debootstrap >= 1.0.141.
+
+[RESULTADO]
+
+debootstrap 1.0.141
+
+=============================================================================================================================
+
+FASE 2 — PREPARACIÓN DEL DESTINO
+Enlace lógico de bloques físicos y creación del árbol UEFI.
+
+[BASH]
+
+sudo mount /dev/sda3 /mnt/devuan
+sudo mkdir -p /mnt/devuan/boot/efi
+sudo mount /dev/sda1 /mnt/devuan/boot/efi
+
+[BASH]
+
+lsblk -f
+
+[RESULTADO ESPERADO]:
+-> sda3 montado en /mnt/devuan (ext4)
+-> sda1 montado en /mnt/devuan/boot/efi (vfat)
+
+[RESULTADO]
+
+NAME   FSTYPE FSVER LABEL UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
+sda                                                                           
+├─sda1 vfat   FAT16       E1A7-C5A6                              91.1M     9% /mnt/devuan/boot/efi
+├─sda2 ext4   1.0         2585269f-52d7-4005-9beb-8a445b9bef3e  231.6G     6% /
+└─sda3 ext4   1.0         40a33b42-a9a2-4d2c-a8fa-38592783273c  185.8G     0% /mnt/devuan
+
+=============================================================================================================================
+
+FASE 3 — BOOTSTRAP SEGURO E HIGIENIZACIÓN
+Establece la cadena de confianza criptográfica, limpia el destino y despliega el sistema base.
+
+[BASH]
+
+curl -s "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xB3982868D104092C" -o /tmp/devuan-key.asc
+gpg --show-keys /tmp/devuan-key.asc
+gpg --dearmor < /tmp/devuan-key.asc > /tmp/devuan-archive-keyring.gpg
+
+[RESULTADO]
+
+pub   rsa4096 2022-09-22 [SC]
+      9F8D6C74DE661075FD171BE3B3982868D104092C
+uid                      Devuan Release Signing (Excalibur) <repository@devuan.org>
+
+[BASH]
+
+sudo find /mnt/devuan -mindepth 1 -maxdepth 1 ! -name 'boot' -exec rm -rf {} +
+
+[RESULTADO]
+
+[BASH]
+
+sudo debootstrap \
+  --variant=minbase \
+  --keyring=/tmp/devuan-archive-keyring.gpg \
+  excalibur \
+  /mnt/devuan \
+  http://deb.devuan.org/merged
+
+[RESULTADO ESPERADO]:
+-> Huella digital validada: 9F8D 6C74 DE66 1075 FD17  1BE3 B398 2868 D104 092C
+-> Mensaje final: I: Base system installed successfully.
+
+[RESULTADO]
+
+I: Base system installed successfully.
+
+=============================================================================================================================
+
+FASE 4 — PREPARACIÓN DEL CHROOT
+Proyecta los sistemas de archivos virtuales del núcleo y realiza el salto de entorno.
+
+[BASH]
+sudo mount --bind /dev /mnt/devuan/dev && \
+sudo mount --bind /dev/pts /mnt/devuan/dev/pts && \
+sudo mount --bind /proc /mnt/devuan/proc && \
+sudo mount --bind /sys /mnt/devuan/sys && \
+sudo mount --bind /run /mnt/devuan/run && \
+sudo bash -c 'echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8" > /mnt/devuan/etc/resolv.conf'
+
+[BASH]
+
+sudo chroot /mnt/devuan /bin/bash
+
+[RESULTADO ESPERADO]:
+-> Ingreso exitoso a la shell interna del chroot.
+
+[RESULTADO]
+
+INGRESO EXITOSO A ROOT
+
+=============================================================================================================================
+
+FASE 5 — CADENA DE CONFIANZA APT Y UPGRADE
+Instala el llavero nativo, reestructura las fuentes y eleva el sistema base.
+
+[EJECUTAR DENTRO DEL CHROOT]
+
+[BASH]
+
+apt install -y devuan-keyring
+
+[BASH]
+
+cat << 'EOF' > /etc/apt/sources.list
+deb http://deb.devuan.org/merged excalibur main contrib non-free non-free-firmware
+deb http://deb.devuan.org/merged excalibur-updates main contrib non-free non-free-firmware
+deb http://deb.devuan.org/merged excalibur-security main contrib non-free non-free-firmware
+EOF
+
+[BASH]
+
+apt update && apt full-upgrade -y
+
+[RESULTADO ESPERADO]:
+-> Actualización sin errores GPG.
+
+ACTUALIZACIÓN SIN ERRORES
+=============================================================================================================================
+
+FASE 6 — UTILIDADES BASE Y HERRAMIENTAS DE DIAGNÓSTICO
+Proporciona un entorno de administración funcional. Se incluyen utilidades de red y empaquetado faltantes en v1.0.
+
+[EJECUTAR DENTRO DEL CHROOT]
+
+[BASH]
+
+apt install --no-install-recommends \
+nano sudo bash-completion htop procps \
+pciutils usbutils curl wget less file which \
+rsync lsof strace iproute2 iputils-ping \
+dnsutils zip unzip xz-utils bzip2 man-db manpages -y
+
+[RESULTADO ESPERADO]:
+-> Comandos 'ip', 'ping' y 'dig' disponibles inmediatamente.
+
+[RESULTADO]
+
+INSTALACIÓN COMPLETADA, VERIFICACIÓN PENDIENTE HASTA AUDITORÍA DEL PRIMER ARRANQUE
+
+=============================================================================================================================
+
+FASE 7 — CONSOLIDACIÓN DEL KERNEL Y MICROCÓDIGO
+Instala el núcleo operativo y el microcódigo oficial.
+
+[EJECUTAR DENTRO DEL CHROOT]
+
+[BASH]
+
+apt install --no-install-recommends linux-image-amd64 intel-microcode -y
+update-initramfs -u -k all
+
+[RESULTADO ESPERADO]:
+-> Imagen initramfs generada sin errores.
+
+update-initramfs: Generating /boot/initrd.img-6.12.90+deb13.1-amd64
+W: No zstd in /usr/bin:/sbin:/bin, using gzip (LÍNEA INTERESANTE. NO RECORDADA EN V.1)
+
+=============================================================================================================================
+
+FASE 8 — SISTEMA DE INICIALIZACIÓN OPENRC
+Implementa OpenRC como gestor de servicios principal.
+
+[EJECUTAR DENTRO DEL CHROOT]
+
+[BASH]
+apt install --no-install-recommends openrc -y
+
+[RESULTADO ESPERADO]:
+-> rc-service y rc-update disponibles.
+
+[RESULTADO]
+
+INSTALACIÓN COMPLETADA SIN INCONVENIENTES. 
+
+SE HACE LA OBSERVACIÓN DE LA FALTA DE AUDITS INTERNOS DURANTE CHROOT, AUNQUE 
+AL SER YA LA SEGUNDA INSTALACIÓN DE UNA VERSIÓN Y GUÍA DOCUMENTADA QUE FUNCIONÓ
+POSIBLEMENTE NO SEA TAN IMPORTANTE.
+
+=============================================================================================================================
+
+FASE 9 — GESTIÓN DE HARDWARE, DISPOSITIVOS Y SESIONES
+Despliega los componentes de hardware y sesiones.
+
+[EJECUTAR DENTRO DEL CHROOT]
+
+[BASH]
+
+apt install --no-install-recommends dbus elogind udev kmod acpid -y
+
+[RESULTADO ESPERADO]:
+-> D-Bus operativo y elogind disponible para gestión de asientos.
+
+[RESUTLADO]
+
+INTALACIÓN COMPLETADA SIN ERRORES
+
+=============================================================================================================================
+
+FASE 10 — ARQUITECTURA DE RED
+Implementa conectividad cableada e inalámbrica optimizada.
+
+[EJECUTAR DENTRO DEL CHROOT]
+
+[BASH]
+
+apt install --no-install-recommends connman iwd iw wireless-regdb ethtool nftables -y
+
+[RESULTADO ESPERADO]:
+-> Binarios de red instalados sin wpa_supplicant.
+
+[RESULTADO]
+
+INSTALACIÓN COMPLETADA SIN CONTRATIEMPOS
+
+=============================================================================================================================
+
+FASE 11 — INFRAESTRUCTURA DE ALMACENAMIENTO Y FIRMWARE
+Soporte para sistemas de archivos y controladores. Incluye mitigación proactiva para tarjetas Realtek.
+
+[EJECUTAR DENTRO DEL CHROOT]
+
+[BASH]
+
+apt install --no-install-recommends \
+e2fsprogs dosfstools parted gdisk smartmontools \
+firmware-linux-free firmware-intel-graphics \
+firmware-misc-nonfree firmware-realtek \
+locales -y
+
+[RESULTADO ESPERADO]:
+-> Paquete firmware-realtek instalado para prevenir error rtl8168e-3.fw en dmesg.
+
+W: No zstd in /usr/bin:/sbin:/bin, using gzip (LÍNEA INTERESANTE)
+COMPLETADO
+
+=============================================================================================================================
+
+FASE 12 — CONFIGURACIÓN DE IDENTIDAD DE RED (HOSTNAME)
+Inyecta el nombre del host.
+
+[EJECUTAR DENTRO DEL CHROOT]
+
+[BASH]
+
+echo "devuan-hardened" > /etc/hostname
+
+
+
+=============================================================================================================================
+
+FASE 13 — TABLA DE RESOLUCIÓN ESTÁTICA (HOSTS)
+Estructura la tabla local de red.
+
+[EJECUTAR DENTRO DEL CHROOT]
+
+[BASH]
+
+cat << 'EOF' > /etc/hosts
+127.0.0.1   localhost
+127.0.1.1   devuan-hardened
+
+::1         localhost ip6-localhost ip6-loopback
+ff02::1     ip6-allnodes
+ff02::2     ip6-allrouters
+EOF
+
+=============================================================================================================================
+
+FASE 14 — CONTROL DE ACCESO RAÍZ (ROOT)
+Asigna credenciales de administrador.
+
+[EJECUTAR DENTRO DEL CHROOT]
+
+[BASH]
+
+passwd root
+
+=============================================================================================================================
+
+FASE 15 — APROVISIONAMIENTO DEL USUARIO OPERADOR
+Crea la cuenta del usuario operativo.
+
+[EJECUTAR DENTRO DEL CHROOT]
+
+[BASH]
+
+useradd -m -s /bin/bash aldodevuan && passwd aldodevuan
+
+=============================================================================================================================
+
+FASE 16 — ENDURECIMIENTO DE PRIVILEGIOS (SUDOERS)
+Asigna privilegios administrativos y políticas de sesión.
+
+[EJECUTAR DENTRO DEL CHROOT]
+
+[BASH]
+
+usermod -aG sudo aldodevuan
+
+[BASH]
+
+cat << 'EOF' > /etc/sudoers.d/90-hardened-operator
+Defaults env_reset, timestamp_timeout=5
+aldodevuan ALL=(ALL:ALL) ALL
+EOF
+
+[BASH]
+
+chmod 0440 /etc/sudoers.d/90-hardened-operator
+
+visudo -c
+
+[RESULTADO ESPERADO]:
+-> parsed OK para las reglas de sudoers.
+
+[RESULTADO]
+
+/etc/sudoers: parsed OK
+/etc/sudoers.d/90-hardened-operator: parsed OK
+/etc/sudoers.d/README: parsed OK
+
+=============================================================================================================================
+
+FASE 17 — CONFIGURACIÓN DE ALMACENAMIENTO ESTÁTICO (FSTAB)
+Mapea los puntos de montaje con banderas de seguridad.
+
+[EJECUTAR DENTRO DEL CHROOT]
+
+[BASH]
+
+blkid /dev/sda3 && blkid /dev/sda1
+
+[RESULTADO]
+
+/dev/sda3: UUID="40a33b42-a9a2-4d2c-a8fa-38592783273c" BLOCK_SIZE="4096" TYPE="ext4" PARTUUID="6168f870-bbc4-4192-b54c-e956234e8e5c"
+/dev/sda1: SEC_TYPE="msdos" UUID="E1A7-C5A6" BLOCK_SIZE="512" TYPE="vfat" PARTUUID="9d42001c-7cef-46a3-bd42-af89081f4563"
+
+[BASH]
+
+cat << 'EOF' > /etc/fstab
+# <file system>                            <mount point>   <type>  <options>                               <dump>  <pass>
+# /dev/sda3 - Raíz del Sistema
+UUID=40a33b42-a9a2-4d2c-a8fa-38592783273c   /               ext4    noatime,errors=remount-ro               0       1
+
+# /dev/sda1 - Partición de Arranque UEFI
+UUID=E1A7-C5A6                             /boot/efi       vfat    noatime,nodev,nosuid,noexec,umask=0077  0       2
+
+# Sistemas de archivos virtuales standard
+proc                                       /proc           proc    defaults                                0       0
+EOF
+
+=============================================================================================================================
+
+FASE 18 — ORQUESTACIÓN DE SERVICIOS CRÍTICOS (OPENRC)
+Registra los demonios requeridos para red y sesión. Corrige fallo de inicialización V1.0.
+
+[EJECUTAR DENTRO DEL CHROOT]
+
+[BASH]
+
+rc-update add dbus default
+rc-update add elogind default
+rc-update add connman default
+rc-update add iwd default
+
+[BASH]
+rc-update show
+
+[RESULTADO ESPERADO]:
+-> iwd, connman, dbus y elogind deben listar explícitamente en runlevel default.
+
+[RESULTADO]
+
+                acpid |      default                                        
+             bootlogd |                                              sysinit
+             bootlogs |      default               recovery                 
+          bootmisc.sh |                                              sysinit
+           brightness |                                              sysinit
+              cgroups |                                              sysinit
+           checkfs.sh |                                              sysinit
+ checkroot-bootclean.sh |                                              sysinit
+         checkroot.sh |                                              sysinit
+              connman |      default                                        
+                 dbus |      default                                        
+              elogind |      default                                        
+                eudev |                                              sysinit
+          hostname.sh |                                              sysinit
+           hwclock.sh |                                              sysinit
+                  iwd |      default                                        
+            killprocs |                            recovery                 
+                 kmod |                                              sysinit
+       mount-configfs |                                              sysinit
+ mountall-bootclean.sh |                                              sysinit
+          mountall.sh |                                              sysinit
+     mountdevsubfs.sh |                                              sysinit
+       mountkernfs.sh |                                              sysinit
+ mountnfs-bootclean.sh |                                              sysinit
+          mountnfs.sh |                                              sysinit
+               procps |                                              sysinit
+             rc.local |      default                                        
+            rmnologin |      default                                        
+                rsync |      default                                        
+            savecache |                        off                          
+             sendsigs |                        off                          
+               single |                            recovery                 
+        smartmontools |      default                                        
+        stop-bootlogd |      default                                        
+ stop-bootlogd-single |                                              sysinit
+                 sudo |      default                                        
+                 udev |                                              sysinit
+             umountfs |                        off                          
+         umountnfs.sh |                        off                          
+           umountroot |                        off                          
+              urandom |                                              sysinit
+
+=============================================================================================================================
+
+FASE 19 — GESTOR DE ARRANQUE (LABORATORIO / DUAL-BOOT)
+Omite la instalación de GRUB en el chroot y delega el arranque al OS-Prober del Host.
+
+[BASH]
+exit
+
+[BASH]
+sync
+
+[BASH]
+sudo umount -R /mnt/devuan/dev
+sudo umount -R /mnt/devuan/sys
+sudo umount /mnt/devuan/proc
+sudo umount /mnt/devuan/run
+sudo umount /mnt/devuan/boot/efi
+sudo umount /mnt/devuan
+
+[BASH]
+sudo update-grub
+
+[RESULTADO ESPERADO]:
+-> Salida de update-grub en el Host reportando: "Found Devuan GNU/Linux 6 (excalibur) on /dev/sda3".
+
+[RESULTADO]
+
+Found Devuan GNU/Linux 6 (excalibur) on /dev/sda3
+Adding boot menu entry for UEFI Firmware Settings ...
+done
+
+=============================================================================================================================
+
+FASE 20.5 — AUDITORÍA OPERATIVA INICIAL
+Verificar capacidades mínimas de administración en el primer arranque real.
+
+VALIDACIONES (A EJECUTAR EN DEVUAN FÍSICO):
+[ ] ip a
+[ ] ping -c 3 1.1.1.1
+[ ] dig deb.devuan.org
+[ ] lspci
+[ ] lsusb
+[ ] rc-status -s
+[ ] connmanctl state
+[ ] dmesg | grep -iE "error|failed"
+[ ] uname -r
+[ ] loginctl
+
+[RESULTADO ESPERADO]:
+-> Interfaz lo y wlan listadas.
+-> OpenRC mostrando servicios base en [ started ].
+-> Resolución DNS y ping exitosos.
+-> Sistema listo para Devuan Hardener.
+
+=============================================================================================================================
+
+FASE 21 — CERTIFICACIÓN DEVUAN CORE
+
+CHECKLIST:
+[X] Bootstrap reproducible
+[X] Chroot funcional
+[X] OpenRC operativo
+[X] Red funcional (Connman + IWD operando juntos)
+[X] Firmware validado (Sin errores de red cableada)
+[ ] Auditoría operativa superada
+[X] Reinicio exitoso en Dual Boot
+[X] Documentación actualizada
+
+RESULTADO FINAL:
+DEVUAN CORE 2.0 CERTIFICADO
+
+=============================================================================================================================
+FIN DEL DOCUMENTO
+=============================================================================================================================
