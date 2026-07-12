@@ -1,0 +1,2340 @@
+=============================================================================================================================
+DEVUAN CORE 2.1
+GUÍA REPRODUCIBLE DE CONSTRUCCIÓN Y CERTIFICACIÓN
+
+ESTADO: RELEASE CANDIDATE (RC1)
+BASE: DEVUAN CORE 2.0 CERTIFICADA (Esquema de particiones y montajes idéntico)
+OBJETIVO: Construir un sistema Devuan mínimo, reproducible, auditado y 
+          optimizado que sirva como base oficial para futuras capas de endurecimiento.
+=============================================================================================================================
+
+FILOSOFÍA DEL PROYECTO
+======================
+1. Primero arranca.
+2. Después funciona.
+3. Después se administra.
+4. Después se optimiza.
+5. Después se endurece.
+
+Devuan Core NO es Devuan Hardened.
+
+=============================================================================================================================
+PREFACIO A — SALIDA SEGURA DEL CHROOT
+=====================================
+# Verificar montajes
+mount | grep /mnt/devuan
+
+# Salir
+exit
+
+# Sincronizar
+sync
+
+# Desmontar recursivamente
+umount -R /mnt/devuan
+
+# Si existen errores o recursos ocupados:
+# umount -l /mnt/devuan/dev/pts
+# umount -l /mnt/devuan/dev
+# umount -l /mnt/devuan/proc
+# umount -l /mnt/devuan/sys
+# umount -l /mnt/devuan/run
+# umount -R /mnt/devuan
+
+=============================================================================================================================
+PREFACIO B — REINGRESO AL CHROOT
+================================
+# SIN LUKS
+mount /dev/sdX3 /mnt/devuan
+
+# CON LUKS (Si aplica)
+# cryptsetup open /dev/sdX3 cryptroot
+# mount /dev/mapper/cryptroot /mnt/devuan
+
+# Montar EFI
+mount /dev/sdX1 /mnt/devuan/boot/efi
+
+# Montar pseudo sistemas
+mount --bind /dev /mnt/devuan/dev
+mount --bind /dev/pts /mnt/devuan/dev/pts
+mount -t proc proc /mnt/devuan/proc
+mount -t sysfs sysfs /mnt/devuan/sys
+mount -t tmpfs tmpfs /mnt/devuan/run
+
+# Ingresar
+chroot /mnt/devuan /bin/bash
+
+=============================================================================================================================
+FASE 0.0 — PREPARACIÓN DEL DISCO (Alineado con v2.0)
+===================================================
+# Instalar herramientas en el Host:
+sudo apt update && sudo apt install -y parted dosfstools e2fsprogs gdisk cryptsetup
+
+# Detectar discos:
+lsblk
+
+# Eliminar firmas y GPT residual (Reemplazar sdX por el disco real, ej: sda)
+sudo wipefs -a /dev/sdX
+sudo gdisk --zap-all /dev/sdX
+
+# Crear GPT limpia:
+sudo parted /dev/sdX mklabel gpt
+
+# PARTICIONADO OFICIAL (Fiel a v2.0, sin /boot separada para asegurar compatibilidad):
+# /dev/sdX1 -> EFI   -> FAT32 -> 512 MB
+# /dev/sdX3 -> ROOT  -> EXT4  -> Resto del disco
+
+sudo parted /dev/sdX mkpart ESP fat32 1MiB 513MiB
+sudo parted /dev/sdX set 1 esp on
+sudo parted /dev/sdX mkpart ROOT ext4 513MiB 100%
+
+=============================================================================================================================
+FORMATEO Y PREPARACIÓN DE CAPAS
+===============================
+
+OPCIÓN A: RAÍZ ESTÁNDAR (SIN CIFRADO)
+-------------------------------------
+mkfs.fat -F32 /dev/sdX1
+mkfs.ext4 /dev/sdX3
+
+# Montaje Base
+sudo mount /dev/sdX3 /mnt/devuan
+sudo mkdir -p /mnt/devuan/boot/efi
+sudo mount /dev/sdX1 /mnt/devuan/boot/efi
+
+
+OPCIÓN B: RAÍZ CON CIFRADO LUKS (OPCIONAL v2.1)
+-----------------------------------------------
+mkfs.fat -F32 /dev/sdX1
+
+# Inicializar y abrir contenedor
+sudo cryptsetup luksFormat /dev/sdX3
+sudo cryptsetup open /dev/sdX3 cryptroot
+
+# Formatear mapeador lógico
+sudo mkfs.ext4 /dev/mapper/cryptroot
+
+# Montaje estructurado
+sudo mount /dev/mapper/cryptroot /mnt/devuan
+sudo mkdir -p /mnt/devuan/boot/efi
+sudo mount /dev/sdX1 /mnt/devuan/boot/efi
+
+=============================================================================================================================
+NUEVAS CAPAS DE OPTIMIZACIÓN v2.1 (INYECTADAS PRE-BOOTSTRAP)
+============================================================
+# FASE 0B — OPTIMIZACIÓN GLOBAL DE APT
+sudo mkdir -p /mnt/devuan/etc/apt/apt.conf.d
+cat << 'EOF' | sudo tee /mnt/devuan/etc/apt/apt.conf.d/99lean
+APT::Install-Recommends "false";
+APT::Install-Suggests "false";
+EOF
+
+# FASE 0C — OPTIMIZACIÓN GLOBAL DE DPKG
+sudo mkdir -p /mnt/devuan/etc/dpkg/dpkg.cfg.d
+cat << 'EOF' | sudo tee /mnt/devuan/etc/dpkg/dpkg.cfg.d/01_nodoc
+path-exclude /usr/share/doc/*
+path-exclude /usr/share/man/*
+path-exclude /usr/share/info/*
+path-exclude /usr/share/locale/*
+path-include /usr/share/locale/en*
+path-include /usr/share/locale/es*
+EOF
+
+=============================================================================================================================
+FASE 0 — AUDITORÍA Y CONECTIVIDAD DEL HOST
+==========================================
+date && uname -a && curl -I http://deb.devuan.org
+# [RESULTADO ESPERADO]: Fecha actual correcta y HTTP/1.1 200 OK.
+
+=============================================================================================================================
+FASE 1 — DEPENDENCIAS DEL HOST
+=============================
+sudo apt update && sudo apt install -y debootstrap arch-test curl wget ca-certificates gnupg
+debootstrap --version
+# [RESULTADO ESPERADO]: Versión de debootstrap >= 1.0.141.
+
+=============================================================================================================================
+FASE 2 — PREPARACIÓN DEL DESTINO
+================================
+# Validación visual del árbol de montaje estructural antes del despliegue
+lsblk -f
+# [RESULTADO ESPERADO]: Raíz en /mnt/devuan y EFI en /mnt/devuan/boot/efi
+
+=============================================================================================================================
+FASE 3 — BOOTSTRAP SEGURO E HIGIENIZACIÓN
+========================================
+curl -s "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xB3982868D104092C" -o /tmp/devuan-key.asc
+gpg --show-keys /tmp/devuan-key.asc
+gpg --dearmor < /tmp/devuan-key.asc > /tmp/devuan-archive-keyring.gpg
+
+# Limpieza higiénica respetando el árbol de montaje activo
+sudo find /mnt/devuan -mindepth 1 -maxdepth 1 ! -name 'boot' -exec rm -rf {} +
+
+# Despliegue del sistema base ejecutable
+sudo debootstrap \
+  --variant=minbase \
+  --keyring=/tmp/devuan-archive-keyring.gpg \
+  excalibur \
+  /mnt/devuan \
+  http://deb.devuan.org/merged
+
+# [RESULTADO ESPERADO]: I: Base system installed successfully.
+
+=============================================================================================================================
+FASE 4 — PREPARACIÓN DEL CHROOT
+==============================
+sudo mount --bind /dev /mnt/devuan/dev && \
+sudo mount --bind /dev/pts /mnt/devuan/dev/pts && \
+sudo mount --bind /proc /mnt/devuan/proc && \
+sudo mount --bind /sys /mnt/devuan/sys && \
+sudo mount --bind /run /mnt/devuan/run && \
+sudo bash -c 'echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8" > /mnt/devuan/etc/resolv.conf'
+
+sudo chroot /mnt/devuan /bin/bash
+# [RESULTADO ESPERADO]: Ingreso exitoso a la shell interna del chroot.
+
+=============================================================================================================================
+[EJECUTAR DENTRO DEL CHROOT]
+FASE 5 — CADENA DE CONFIANZA APT Y UPGRADE
+==========================================
+apt install -y devuan-keyring
+
+cat << 'EOF' > /etc/apt/sources.list
+deb http://deb.devuan.org/merged excalibur main contrib non-free non-free-firmware
+deb http://deb.devuan.org/merged excalibur-updates main contrib non-free non-free-firmware
+deb http://deb.devuan.org/merged excalibur-security main contrib non-free non-free-firmware
+EOF
+
+apt update && apt full-upgrade -y
+# [RESULTADO ESPERADO]: Actualización limpia sin errores GPG.
+
+=============================================================================================================================
+FASE 6 — UTILIDADES BASE Y HERRAMIENTAS DE DIAGNÓSTICO
+======================================================
+apt install --no-install-recommends \
+nano sudo bash-completion htop procps \
+pciutils usbutils curl wget less file which \
+rsync lsof strace iproute2 iputils-ping \
+dnsutils zip unzip xz-utils bzip2 man-db manpages -y
+
+=============================================================================================================================
+FASE 7 — CONSOLIDACIÓN DEL KERNEL Y MICROCÓDIGO
+==============================================
+apt install --no-install-recommends linux-image-amd64 intel-microcode -y
+update-initramfs -u -k all
+# [RESULTADO ESPERADO]: Imagen initramfs generada en la raíz sin errores.
+
+=============================================================================================================================
+FASE 8 — SISTEMA DE INICIALIZACIÓN OPENRC
+========================================
+apt install --no-install-recommends openrc -y
+
+=============================================================================================================================
+FASE 9 — GESTIÓN DE HARDWARE, DISPOSITIVOS Y SESIONES
+====================================================
+apt install --no-install-recommends dbus elogind udev kmod acpid -y
+
+=============================================================================================================================
+FASE 10 — ARQUITECTURA DE RED
+============================
+apt install --no-install-recommends connman iwd iw wireless-regdb ethtool nftables -y
+
+=============================================================================================================================
+FASE 11 — INFRAESTRUCTURA DE ALMACENAMIENTO Y FIRMWARE
+=====================================================
+apt install --no-install-recommends \
+e2fsprogs dosfstools parted gdisk smartmontools \
+firmware-linux-free firmware-intel-graphics \
+firmware-misc-nonfree firmware-realtek \
+locales -y
+
+=============================================================================================================================
+FASE 12 — CONFIGURACIÓN DE IDENTIDAD DE RED (HOSTNAME)
+======================================================
+echo "devuan-core2.1" > /etc/hostname
+
+=============================================================================================================================
+FASE 13 — TABLA DE RESOLUCIÓN ESTÁTICA (HOSTS)
+==============================================
+cat << 'EOF' > /etc/hosts
+127.0.0.1   localhost
+127.0.1.1   devuan-core2.1
+
+::1         localhost ip6-localhost ip6-loopback
+ff02::1     ip6-allnodes
+ff02::2     ip6-allrouters
+EOF
+
+=============================================================================================================================
+FASE 14 — CONTROL DE ACCESO RAÍZ (ROOT)
+=======================================
+passwd root
+
+=============================================================================================================================
+FASE 15 — APROVISIONAMIENTO DEL USUARIO OPERADOR
+================================================
+useradd -m -s /bin/bash aldodevuan && passwd aldodevuan
+
+=============================================================================================================================
+FASE 16 — ENDURECIMIENTO DE PRIVILEGIOS (SUDOERS)
+=================================================
+usermod -aG sudo aldodevuan
+
+# Nota v2.1: Esta regla asegura la persistencia y límites requeridos para Core.
+cat << 'EOF' > /etc/sudoers.d/90-hardened-operator
+Defaults env_reset, timestamp_timeout=5
+aldodevuan ALL=(ALL:ALL) ALL
+EOF
+
+chmod 0440 /etc/sudoers.d/90-hardened-operator
+visudo -c
+# [RESULTADO ESPERADO]: parsed OK para las reglas de sudoers.
+
+=============================================================================================================================
+FASE 17 — CONFIGURACIÓN DE ALMACENAMIENTO ESTÁTICO (FSTAB)
+=========================================================
+# Ejecutar blkid para capturar los identificadores reales
+# (Se puede hacer abriendo otra terminal en el Host)
+
+cat << 'EOF' > /etc/fstab
+# <file system>                            <mount point>   <type>  <options>                               <dump>  <pass>
+# Raíz del Sistema (Si usa LUKS, reemplace por /dev/mapper/cryptroot o su UUID correspondiente)
+UUID=9b4562b0-6cfc-4005-85bc-aedffc57d3f8   /               ext4    noatime,errors=remount-ro               0       1
+
+# Partición de Arranque UEFI
+UUID=E1A7-C5A6                             /boot/efi       vfat    noatime,nodev,nosuid,noexec,umask=0077  0       2
+
+# Sistemas de archivos virtuales standard
+proc                                        /proc           proc    defaults                                0       0
+EOF
+
+=============================================================================================================================
+FASE 18 — ORQUESTACIÓN DE SERVICIOS CRÍTICOS (OPENRC)
+====================================================
+rc-update add dbus default
+rc-update add elogind default
+rc-update add connman default
+rc-update add iwd default
+
+rc-update show
+# [RESULTADO ESPERADO]: iwd, connman, dbus y elogind activos en nivel default.
+
+=============================================================================================================================
+FASE 19 — GESTOR DE ARRANQUE (DELEGADO AL HOST - DUAL BOOT)
+===========================================================
+exit
+sync
+
+sudo umount -R /mnt/devuan/dev
+sudo umount -R /mnt/devuan/sys
+sudo umount /mnt/devuan/proc
+sudo umount /mnt/devuan/run
+sudo umount /mnt/devuan/boot/efi
+sudo umount /mnt/devuan
+
+# EJECUTAR EN EL HOST ANFITRIÓN (ej. antiX):
+sudo update-grub
+# [RESULTADO ESPERADO]: "Found Devuan GNU/Linux 6 (excalibur) on /dev/sda3".
+
+=============================================================================================================================
+FASE ADICIONAL LUKS (SÓLO SI SE ELIGIÓ LA OPCIÓN B EN EL FORMATEO)
+==================================================================
+# Si usaste cifrado raíz, ejecuta esto DENTRO del chroot antes de la Fase 19:
+
+apt install cryptsetup-initramfs -y
+
+# Mapear el volumen físico en el espacio virtual (Formato de /etc/crypttab):
+# cryptroot UUID=<UUID_REAL_DE_SDX3> none luks
+nano /etc/crypttab
+
+# Reconstruir initramfs para cargar los módulos criptográficos en el arranque
+update-initramfs -u -k all
+
+====================================================================
+FASE O0 — OBSERVABILIDAD MÍNIMA
+===============================
+# Ejecutar dentro del chroot para el control de telemetría inicial
+apt install htop iotop iftop ncdu -y
+
+====================================================================
+FASE O1 — TMPFS TEMPORAL (RENDIMIENTO EN RAM)
+=============================================
+# Inyectar al final del fstab para mitigar escrituras innecesarias en almacenamiento sólido
+cat << 'EOF' >> /etc/fstab
+
+# Volatilización de temporales (v2.1)
+tmpfs /tmp     tmpfs defaults,noatime,nosuid,nodev 0 0
+tmpfs /var/tmp tmpfs defaults,noatime,nosuid,nodev 0 0
+EOF
+# NOTA: Los registros (/var/log) se mantienen persistentes.
+
+=============================================================================================================================
+FASE 20.5 — AUDITORÍA OPERATIVA INICIAL (EJECUTAR EN EL PRIMER ARRANQUE REAL)
+=============================================================================
+[ ] ip a
+[ ] ping -c 3 1.1.1.1
+[ ] dig deb.devuan.org
+[ ] lspci
+[ ] lsusb
+[ ] rc-status -s
+[ ] connmanctl state
+[ ] dmesg | grep -iE "error|failed"
+[ ] uname -r
+[ ] loginctl
+
+# [RESULTADO ESPERADO]: Servicios base en [ started ]. Interfaces de red operativas.
+
+=============================================================================================================================
+FASE 21 — CRITERIOS DE CERTIFICACIÓN DEVUAN CORE 2.1
+====================================================
+[ ] Bootstrap reproducible
+[ ] Chroot funcional sin fugas de memoria
+[ ] OpenRC operativo (dbus, elogind, connman, iwd en runlevel default)
+[ ] Red funcional (Connman + IWD operando juntos sin wpa_supplicant)
+[ ] Firmware realtek validado (Sin errores rtl8168e en dmesg)
+[ ] Reglas de Sudoers validadas mediante visudo -c
+[ ] Política APT y DPKG verificadas (`99lean` y `01_nodoc`)
+[ ] Almacenamiento optimizado (noatime y tmpfs activos en /tmp)
+[ ] Logs persistentes intactos
+[ ] Reinicios múltiples exitosos desde el GRUB del Host
+[ ] LUKS validado con solicitud de contraseña funcional (si aplica)
+
+=============================================================================================================================
+RESULTADO FINAL:
+DEVUAN CORE 2.1 CERTIFICADO (RC1)
+=============================================================================================================================
+FIN DEL DOCUMENTO
+
+
+==============================================================================================================================
+INICIO DE LA DOCUMENTACIÓN: 
+
+==============================================================================================================================
+
+FASE 0.0 — PREPARACIÓN DEL DISCO Y HERRAMIENTAS
+Paso 1: Lo primero es instalar las herramientas necesarias en tu sistema anfitrión (Host, ej. antiX) para poder gestionar el cifrado y las particiones.
+
+Por favor, ejecuta el siguiente comando en la terminal de tu sistema anfitrión:
+
+Bash
+sudo apt update && sudo apt install -y parted dosfstools e2fsprogs gdisk cryptsetup
+Qué esperar: El gestor de paquetes debe terminar limpiamente sin errores de dependencias o repositorios.
+
+PASS [X]
+=============================================================================================================================
+
+FASE 0.0 — PASO 2: DETECCIÓN DE DISCOS
+Antes de tocar la partición de laboratorio, vamos a asegurarnos de que el sistema anfitrión reconoce correctamente tu hardware y la estructura de bloques actual.
+
+Por favor, ejecuta este comando en el anfitrión:
+
+Bash
+
+lsblk -f
+
+Qué debes verificar en la salida:
+
+Confirma que visualizas el disco /dev/sda.
+
+Busca la línea de /dev/sda3. Debería aparecer listada como una partición normal 
+(y quizás con su sistema de archivos actual).
+
+Asegúrate de que ningún proceso o sistema esté montando automáticamente /dev/sda3 
+en este momento (la columna MOUNTPOINTS o MOUNTPOINT para sda3 debe estar vacía).
+
+[RESULTADO]
+
+NAME   FSTYPE FSVER LABEL UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
+sda                                                                           
+├─sda1 vfat   FAT16       E1A7-C5A6                                           
+├─sda2 ext4   1.0         2585269f-52d7-4005-9beb-8a445b9bef3e  231.2G     6% /
+└─sda3 ext4   1.0         40a33b42-a9a2-4d2c-a8fa-38592783273c  
+
+PASS [X]
+=============================================================================================================================
+
+FASE 0.0 — PASO 3: LIMPIEZA DE FIRMAS PREVIAS
+Para evitar que el contenedor LUKS que vamos a crear tenga conflictos con los metadatos y firmas remanentes 
+del sistema de archivos ext4 actual de sda3, debemos higienizar la partición.
+
+Por favor, ejecuta este comando en el anfitrión:
+
+Bash
+
+sudo wipefs -a /dev/sda3
+
+Qué esperar: El comando debería ejecutarse de forma instantánea sin devolver errores,
+borrando la firma ext4 anterior de esa partición específica.
+ 
+[RESULTADO]
+
+/dev/sda3: 2 bytes were erased at offset 0x00000438 (ext4): 53 ef 
+ 
+PASS [X] 
+============================================================================================================================= 
+ 
+FASE 0A — PASO 4: INICIALIZACIÓN DEL CONTENEDOR LUKS
+Vamos a formatear /dev/sda3 como un contenedor cifrado LUKS. Al ejecutar este comando, el sistema te 
+pedirá que confirmes escribiendo YES (en mayúsculas) y luego te solicitará la frase de contraseña (passphrase) 
+con la que se protegerán tus datos.
+
+⚠️ Nota de Laboratorio: Elige una contraseña que recuerdes fácilmente para este despliegue, ya que la necesitarás 
+cada vez que arranques o reingreses al entorno.
+
+Por favor, ejecuta este comando en el anfitrión:
+
+Bash
+
+sudo cryptsetup luksFormat /dev/sda3 
+
+[RESULTADO]
+¡ATENCIÓN!
+==========
+Esto sobreescribirá los datos en /dev/sda3 de forma irrevocable.
+
+¿Está seguro? (Teclee 'yes' en mayúsculas): YES
+Introduzca la frase contraseña de /dev/sda3: 
+Verifique la frase contraseña: 
+
+contraseña elegida: devuancore (si teclee bien ajajja)
+despues terminal normal sin salidas. Silencio. En blanco. 
+ 
+PASS [X]
+
+=============================================================================================================================
+FASE 0A — PASO 5: APERTURA DEL CONTENEDOR CIFRADO
+Ahora que la partición física está cifrada, necesitamos "abrirla" para que el sistema operativo cree una interfaz 
+virtual mapeada (un dispositivo de bloques descifrado en tiempo real) en la cual podamos formatear el sistema de 
+archivos ext4.
+
+Al ejecutar este comando, te pedirá la contraseña que acabas de configurar (devuancore).
+
+Por favor, ejecuta este comando en el anfitrión:
+
+Bash
+
+sudo cryptsetup open /dev/sda3 cryptroot
+
+Qué esperar: Tras introducir la contraseña correctamente, el comando terminará en silencio y se creará 
+un nodo lógico en /dev/mapper/cryptroot.
+
+[RESULTADO]
+
+Introduzca la frase contraseña de /dev/sda3: 
+ATENCIÓN: la operación de ranura de claves podría fallar porque requiere más memoria de la que está disponible.
+No hay ninguna clave disponible con esa frase contraseña. (xD me equivoque en la contraseña)
+Introduzca la frase contraseña de /dev/sda3: 
+ATENCIÓN: la operación de ranura de claves podría fallar porque requiere más memoria de la que está disponible.
+Luego silecio de terminal termino en blanco.
+
+PASS [X]
+=============================================================================================================================
+FASE 0A — PASO 6: CREACIÓN DEL SISTEMA DE ARCHIVOS EN LA RAÍZ CIFRADA
+Ahora que tenemos el canal descifrado abierto en /dev/mapper/cryptroot, vamos a formatearlo con el sistema de 
+archivos oficial (ext4).
+
+Por favor, ejecuta el siguiente comando en el anfitrión:
+
+Bash
+
+sudo mkfs.ext4 -F /dev/mapper/cryptroot
+
+Qué esperar: Verás las líneas de salida típicas de mkfs.ext4 creando el superbloque, las tablas de inodos y 
+los bloques de datos, finalizando con un resumen exitoso.
+
+[RESULTADO] 
+
+mke2fs 1.47.2 (1-Jan-2025)
+Se está creando un sistema de ficheros con 52424704 bloques de 4k y 13107200 nodos-i
+UUID del sistema de ficheros: 174da814-b2c2-48a4-b4bc-662af1a63610
+Respaldos del superbloque guardados en los bloques: 
+    32768, 98304, 163840, 229376, 294912, 819200, 884736, 1605632, 2654208, 
+    4096000, 7962624, 11239424, 20480000, 23887872
+
+Reservando las tablas de grupo: hecho                           
+Escribiendo las tablas de nodos-i: hecho                           
+Creando el fichero de transacciones (262144 bloques): hecho
+Escribiendo superbloques y la información contable del sistema de ficheros: hecho
+
+PASS [X]
+
+=============================================================================================================================
+FASE 2 — PASO 7: MONTAJE DE LA RAÍZ CIFRADA
+Ahora que /dev/mapper/cryptroot tiene un formato válido, vamos a crear el punto de montaje oficial en el 
+Host (/mnt/devuan) y a montar nuestra nueva raíz allí.
+
+Por favor, ejecuta este bloque en el anfitrión:
+
+Bash
+
+sudo mkdir -p /mnt/devuan && sudo mount /dev/mapper/cryptroot /mnt/devuan
+
+Qué esperar: El comando debe ejecutarse instantáneamente en silencio, enlazando la raíz cifrada al árbol
+de directorios del Host. 
+ 
+PASS [X] 
+ 
+==============================================================================================================================
+
+FASE 2 — PASO 8: CREACIÓN DEL ÁRBOL UEFI Y MONTAJE DE LA PARTICIÓN EFI
+Siguiendo estrictamente la arquitectura probada de la versión 2.0, la partición de arranque UEFI (/dev/sda1) 
+debe montarse dentro del directorio /boot/efi de nuestra nueva raíz.
+
+Por favor, ejecuta el siguiente comando en el anfitrión para crear el directorio y montar la partición:
+
+Bash
+
+sudo mkdir -p /mnt/devuan/boot/efi && sudo mount /dev/sda1 /mnt/devuan/boot/efi
+
+Qué esperar: El comando debe finalizar sin errores, dejando la partición EFI enlazada correctamente al árbol de instalación.
+
+PASS [X]
+
+==============================================================================================================================
+
+FASE 0B — PASO 9: OPTIMIZACIÓN PRE-BOOTSTRAP DE APT
+Para asegurar que desde el primer segundo la instalación sea ultra-mínima y reproducible, vamos a inyectar la 
+optimización global de APT dentro del árbol montado. Esto evitará que se descarguen paquetes recomendados o sugeridos 
+innecesarios durante el debootstrap.
+
+Por favor, ejecuta este bloque de comandos en el anfitrión:
+
+Bash
+
+sudo mkdir -p /mnt/devuan/etc/apt/apt.conf.d && \
+cat << 'EOF' | sudo tee /mnt/devuan/etc/apt/apt.conf.d/99lean
+APT::Install-Recommends "false";
+APT::Install-Suggests "false";
+EOF
+
+Qué esperar: Verás las dos líneas del archivo reflejadas en la pantalla y el comando terminará limpiamente
+
+[RESULTADO]
+
+APT::Install-Recommends "false";
+APT::Install-Suggests "false";
+
+PASS [X]
+=============================================================================================================================
+
+FASE 0C — PASO 10: OPTIMIZACIÓN PRE-BOOTSTRAP DE DPKG
+Para economizar espacio en disco y acelerar el proceso, inyectaremos una directiva global para que dpkg descarte 
+documentación, manuales e idiomas innecesarios durante el desempaquetado, conservando solo los idiomas base 
+(Inglés y Español).
+
+Por favor, ejecuta este bloque de comandos en el anfitrión:
+
+Bash
+
+sudo mkdir -p /mnt/devuan/etc/dpkg/dpkg.cfg.d && \
+cat << 'EOF' | sudo tee /mnt/devuan/etc/dpkg/dpkg.cfg.d/01_nodoc
+path-exclude /usr/share/doc/*
+path-exclude /usr/share/man/*
+path-exclude /usr/share/info/*
+path-exclude /usr/share/locale/*
+path-include /usr/share/locale/en*
+path-include /usr/share/locale/es*
+EOF
+
+Qué esperar: Verás las directivas reflejadas en la pantalla y la terminal regresará a la normalidad lista para recibir 
+órdenes.
+
+[RESULTADO]
+
+path-exclude /usr/share/doc/*
+path-exclude /usr/share/man/*
+path-exclude /usr/share/info/*
+path-exclude /usr/share/locale/*
+path-include /usr/share/locale/en*
+path-include /usr/share/locale/es*
+
+PASS [X]
+
+=============================================================================================================================
+FASE 3 — PASO 11: IMPORTACIÓN DE LA LLAVE DE CONFIANZA DE DEVUAN
+Antes de ejecutar el debootstrap, debemos descargar e importar la clave pública criptográfica oficial del repositorio de 
+Devuan en el Host anfitrión. Esto garantiza que ningún paquete sea alterado o inyectado de forma maliciosa durante la 
+instalación.
+
+Por favor, ejecuta este bloque de comandos en tu Host:
+
+Bash (COPIAR Y PEGAR LAS DOS LÍNEAS TAL CUAL ESTAN AHÍ)
+
+curl -s "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xB3982868D104092C" -o /tmp/devuan-key.asc && \
+gpg --show-keys /tmp/devuan-key.asc
+
+Qué debes verificar en la salida:
+
+Busca la línea que dice pub o la huella digital. Debe coincidir exactamente con esta huella de confianza:
+
+9F8D 6C74 DE66 1075 FD17 1BE3 B398 2868 D104 092C 
+
+[RESULTADO]
+
+pub   rsa4096 2022-09-22 [SC]
+      9F8D6C74DE661075FD171BE3B3982868D104092C
+uid                      Devuan Release Signing (Excalibur) <repository@devuan.org>
+
+PASS [X]
+
+============================================================================================================================
+
+FASE 3 — PASO 12: CONVERSIÓN DE LA LLAVE A FORMATO BINARIO (DEARMOR)
+debootstrap necesita que la llave esté en formato de llavero binario (.gpg) y no en formato de texto plano ASCII (.asc). 
+Vamos a realizar la conversión limpia.
+
+Por favor, ejecuta este comando en el anfitrión:
+
+Bash
+
+gpg --dearmor < /tmp/devuan-key.asc > /tmp/devuan-archive-keyring.gpg
+
+Qué esperar: El comando se ejecutará en silencio e instantáneamente, creando el archivo binario en /tmp.
+
+PASS [X]
+
+==============================================================================================================================
+
+FASE 3 — PASO 13: EJECUCIÓN DEL DEBOOTSTRAP (DESPLIEGUE BASE)
+Llegamos a uno de los pasos más importantes. Vamos a inicializar el sistema base mínimo (variante minbase) apuntando al 
+repositorio oficial de Devuan y utilizando el llavero que acabamos de validar. Este proceso descargará e instalará los 
+paquetes esenciales dentro de tu partición cifrada.
+
+Por favor, ejecuta el siguiente comando en el anfitrión:
+
+Bash (ES UN SOLO BLOQUE, CP Y PEGA EL BLOQUE COMPLETO)
+
+sudo debootstrap \
+  --variant=minbase \
+  --keyring=/tmp/devuan-archive-keyring.gpg \
+  excalibur \
+  /mnt/devuan \
+  http://deb.devuan.org/merged
+  
+Qué esperar: Verás un flujo constante de descargas y configuraciones de paquetes esenciales. 
+Al final, el comando debe concluir con una línea dorada que dice: I: Base system installed successfully.
+
+[RESULTADO]
+
+I: Unpacking the base system...
+I: Base system installed successfully.
+
+PASS [X]
+
+=============================================================================================================================
+FASE 4 — PASO 14: MONTAJE DE LOS PSEUDO-SISTEMAS DE ARCHIVOS (PRE-CHROOT)
+Para que el entorno aislado (chroot) funcione correctamente y pueda comunicarse con el hardware, el kernel y 
+la red del host anfitrión, debemos proyectar de forma virtual los sistemas de archivos críticos /dev, /proc, /sys y /run.
+
+Por favor, ejecuta este bloque de comandos unificado en tu Host:
+
+Bash
+
+sudo mount --bind /dev /mnt/devuan/dev && \
+sudo mount --bind /dev/pts /mnt/devuan/dev/pts && \
+sudo mount --bind /proc /mnt/devuan/proc && \
+sudo mount --bind /sys /mnt/devuan/sys && \
+sudo mount --bind /run /mnt/devuan/run
+
+Qué esperar: Al estar encadenados con &&, si todos se montan correctamente el comando terminará en total silencio.
+
+PASS [X]
+
+=============================================================================================================================
+FASE 4 — PASO 15: INYECCIÓN DE RESOLUCIÓN DNS
+Antes de entrar al chroot, debemos asegurar que el nuevo sistema tenga acceso a internet para poder descargar los paquetes 
+de las fases siguientes. Vamos a escribir de forma temporal los servidores DNS de Cloudflare y Google en el archivo 
+resolv.conf de la raíz montada.
+
+Por favor, ejecuta este comando en el anfitrión:
+
+Bash
+
+sudo bash -c 'echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8" > /mnt/devuan/etc/resolv.conf'
+
+Qué esperar: El comando se ejecutará en silencio, sobrescribiendo cualquier configuración previa en ese archivo específico.
+
+PASS [X]
+
+==============================================================================================================================
+
+FASE 4 — PASO 16: EL GRAN SALTO (INGRESO AL CHROOT)
+Hemos llegado al hito del proyecto. Vamos a abandonar temporalmente el entorno de tu sistema anfitrión para ingresar 
+de forma aislada a la shell interna de tu nuevo Devuan Core 2.1. A partir de este momento, cualquier comando que ejecutes 
+afectará directamente a tu sistema cifrado.
+
+Por favor, ejecuta el siguiente comando en la terminal:
+
+Bash
+
+sudo chroot /mnt/devuan /bin/bash
+
+Qué esperar: El prompt (indicador) de tu terminal debería cambiar sensiblemente (por ejemplo, mostrando algo como 
+root@antiX:/# o simplemente root@localhost:/#), indicando que ahora eres el superusuario root dentro del entorno
+aislado de Devuan.
+
+[RESULTADO]
+
+root@Antix:/# 
+
+PASS [X]
+
+=============================================================================================================================
+
+FASE 5 — PASO 17: INSTALACIÓN DEL LLAVERO NATIVO DE DEVUAN
+Para asegurar que las actualizaciones de los repositorios no tengan errores de llaves públicas (GPG Errors) en el futuro, 
+lo primero que haremos dentro del chroot es instalar el llavero nativo del sistema de manera interna.
+
+Por favor, ejecuta este comando dentro del chroot:
+
+Bash
+
+apt install -y devuan-keyring
+
+Qué esperar: APT leerá el sistema base e instalará el paquete del llavero de forma local y limpia.
+
+[COMPLETADO]
+
+PASS [X]
+
+=============================================================================================================================
+
+FASE 5 — PASO 18: CONFIGURACIÓN DE LOS REPOSITORIOS OFICIALES
+Ahora vamos a reestructurar por completo el archivo sources.list del chroot para incluir las ramas main, contrib, 
+non-free y non-free-firmware de Devuan Excalibur, asegurando que tengamos acceso a todo el software y controladores 
+necesarios en las siguientes fases.
+
+Por favor, ejecuta este bloque de comandos dentro del chroot:
+
+Bash
+
+cat << 'EOF' > /etc/apt/sources.list
+deb http://deb.devuan.org/merged excalibur main contrib non-free non-free-firmware
+deb http://deb.devuan.org/merged excalibur-updates main contrib non-free non-free-firmware
+deb http://deb.devuan.org/merged excalibur-security main contrib non-free non-free-firmware
+EOF
+
+Qué esperar: El comando sobreescribirá el archivo en silencio. Si deseas verificar que se escribió correctamente, 
+puedes lanzar un rápido                        cat /etc/apt/sources.list
+
+[RESULTADO]
+
+cat /etc/apt/sources.list
+deb http://deb.devuan.org/merged excalibur main contrib non-free non-free-firmware
+deb http://deb.devuan.org/merged excalibur-updates main contrib non-free non-free-firmware
+deb http://deb.devuan.org/merged excalibur-security main contrib non-free non-free-firmware
+
+=============================================================================================================================
+
+FASE 5 — PASO 19: ACTUALIZACIÓN ELEVADA DEL SISTEMA BASE
+Ahora que tenemos los repositorios oficiales configurados y el llavero nativo instalado, vamos a sincronizar las listas
+ de paquetes y a realizar un full-upgrade dentro del chroot. Esto elevará cualquier biblioteca base a su versión más 
+ reciente y estable.
+
+Por favor, ejecuta este comando dentro del chroot:
+
+Bash
+
+apt update && apt full-upgrade -y
+
+Qué esperar: Verás la descarga de los índices de los tres repositorios nuevos y el desempaquetado de cualquier
+actualización pendiente. No debe arrojar ningún error de firmas (GPG / KEYEXPIRED).
+
+[COMPLETADO]
+
+PASS [X]
+
+=============================================================================================================================
+
+FASE 6 — PASO 20: UTILIDADES BASE Y HERRAMIENTAS DE DIAGNÓSTICO (CORREGIDO)
+Como ya inyectamos el archivo 99lean en apt.conf.d en el Paso 9, los paquetes recomendados están bloqueados globalmente, 
+pero ejecutarlo con el flag --no-install-recommends como lo tienes documentado es la doble garantía de que el sistema se 
+mantendrá ultra-limpio.
+
+PASO A: UTILIDADES BASE Y HERRAMIENTAS DE DIAGNÓSTICO
+Ejecuta primero este bloque para tener todas tus herramientas de administración listas:
+
+Bash
+
+apt install --no-install-recommends \
+nano sudo bash-completion htop procps \
+pciutils usbutils curl wget less file which \
+rsync lsof strace iproute2 iputils-ping \
+dnsutils zip unzip xz-utils bzip2 man-db manpages -y
+
+[COMPLETADO]
+
+PASO B: SOPORTE CRIPTOGRÁFICO NATIVO PARA EL ARRANQUE
+
+Inmediatamente después de que termine el anterior, ejecutas este para preparar el terreno de la encriptación y el 
+soporte UEFI:
+
+Bash
+
+apt install --no-install-recommends cryptsetup-initramfs dosfstools -y
+
+[COMPLETADO]
+
+(Y recuerda: aquí es donde saltará la advertencia normal de que no hay kernel todavía).
+
+============================================================================================================================
+
+Justificación Técnica para la Documentación (Versión 2.1)
+Por qué configurar crypttab antes del Kernel:
+"En la arquitectura Devuan Core 2.0, el kernel se consolidaba antes de mapear la identidad de los discos.
+Aunque update-initramfs finalizaba exitosamente en el chroot, generaba un ramdisk genérico ('ciego').
+Esto obligaba a realizar una regeneración manual del initramfs al final de la instalación para que el sistema 
+pudiera detectar el contenedor LUKS en el arranque real. En la versión 2.1, se adelanta la configuración de /etc/crypttab. 
+Al inyectar el UUID del contenedor cifrado de forma temprana, cuando el instalador de APT invoca a update-initramfs, 
+el script lee nativamente la topología de almacenamiento y compila una imagen initramfs que ya incluye los módulos 
+criptográficos (cryptsetup) y la instrucción de pedir la contraseña de descifrado desde el primer segundo del booteo, 
+logrando un despliegue más limpio, automatizado y sin pasos redundantes al final."
+
+PASOS COMPLETOS A EJECUTAR (Sincronizados en v2.1)
+
+FASE 6.5 — PASO 21 (Acción 1 de 3)
+
+Primero necesitamos obtener el identificador único (UUID) de la partición cifrada.
+
+Por favor, abre una segunda terminal en tu sistema anfitrión (fuera del chroot) y ejecuta el siguiente comando:
+
+Bash
+
+sudo blkid
+
+Qué buscar: En la salida, localiza la línea que termine en TYPE="crypto_LUKS".
+Copia la cadena de caracteres que aparece dentro de UUID="..." (sin incluir las comillas).
+
+[RESULTADO]
+
+/dev/sda2: UUID="2585269f-52d7-4005-9beb-8a445b9bef3e" BLOCK_SIZE="4096" TYPE="ext4" PARTUUID="fbe96c8c-c23b-42f0-a0cd-75bee475d281"
+/dev/sda3: UUID="737600e3-a581-49fa-8b54-2ae945a5bdfe" TYPE="crypto_LUKS" PARTUUID="6168f870-bbc4-4192-b54c-e956234e8e5c"
+/dev/sda1: SEC_TYPE="msdos" UUID="E1A7-C5A6" BLOCK_SIZE="512" TYPE="vfat" PARTUUID="9d42001c-7cef-46a3-bd42-af89081f4563"
+/dev/mapper/cryptroot: UUID="174da814-b2c2-48a4-b4bc-662af1a63610" BLOCK_SIZE="4096" TYPE="ext4"
+
+[PARTICIÓN ELEGIDA]: /dev/sda3 es tu partición cifrada con el UUID 737600e3-a581-49fa-8b54-2ae945a5bdfe.
+
+FASE 6.5 — PASO 21 (Acción 2 de 3)
+
+Ahora vamos a escribir esa identidad en el archivo de mapeo.
+
+Por favor, ejecuta este comando dentro del chroot para inyectar la línea exacta en /etc/crypttab:
+
+Bash
+
+echo "vroot UUID=737600e3-a581-49fa-8b54-2ae945a5bdfe none luks,discard,initramfs" > /etc/crypttab
+
+[RESULTADO] SILENCIO
+
+FASE 6.5 — PASO 21 (Acción 3 de 3)
+Para cerrar formalmente el Paso 21 y certificar que la persistencia criptográfica quedó idéntica a tu diseño 
+de documentación, vamos a auditar el archivo.
+
+Por favor, ejecuta este comando dentro del chroot:
+
+Bash
+
+cat /etc/crypttab
+
+[RESULTADO]
+
+vroot UUID=737600e3-a581-49fa-8b54-2ae945a5bdfe none luks,discard,initramfs
+
+PASS [X]
+
+=============================================================================================================================
+
+FASE 7 — PASO 22: INSTALACIÓN DEL KERNEL Y MICROCÓDIGO (Acción 1 de 2)
+Ahora que el entorno sabe de dónde va a arrancar, vamos a descargar e instalar el motor del sistema y sus parches de seguridad para el procesador Intel.
+
+Por favor, ejecuta este comando dentro del chroot:
+
+Bash
+
+apt install --no-install-recommends linux-image-amd64 intel-microcode -y
+
+[RESULTADO]
+
+Installing:                     
+  intel-microcode  linux-image-amd64
+
+Installing dependencies:
+  iucode-tool  linux-image-6.12.90+deb13.1-amd64
+
+Suggested packages:
+  firmware-linux-free  linux-doc-6.12  debian-kernel-handbook  grub-pc  | grub-efi-amd64  | extlinux
+
+Recommended packages:
+  apparmor
+
+Summary:
+  Upgrading: 0, Installing: 4, Removing: 0, Not Upgrading: 0
+  Download size: 121 MB
+  Space needed: 132 MB / 199 GB available
+
+Get:1 http://deb.devuan.org/merged excalibur-security/main amd64 linux-image-6.12.90+deb13.1-amd64 amd64 6.12.90-2 [108 MB]
+Get:2 http://deb.devuan.org/merged excalibur/main amd64 iucode-tool amd64 2.3.1-3 [56.1 kB]                                                     
+Get:3 http://deb.devuan.org/merged excalibur/non-free-firmware amd64 intel-microcode amd64 3.20251111.1~deb13u1 [12.8 MB]                       
+Get:4 http://deb.devuan.org/merged excalibur-security/main amd64 linux-image-amd64 amd64 6.12.90-2 [1488 B]                                     
+Fetched 121 MB in 1min 1s (1968 kB/s)                                                                                                           
+perl: warning: Setting locale failed.
+perl: warning: Please check that your locale settings:
+    LANGUAGE = (unset),
+    LC_ALL = (unset),
+    LC_CTYPE = (unset),
+    LC_NUMERIC = (unset),
+    LC_COLLATE = (unset),
+    LC_TIME = (unset),
+    LC_MESSAGES = (unset),
+    LC_MONETARY = (unset),
+    LC_ADDRESS = (unset),
+    LC_IDENTIFICATION = (unset),
+    LC_MEASUREMENT = (unset),
+    LC_PAPER = (unset),
+    LC_TELEPHONE = (unset),
+    LC_NAME = (unset),
+    LANG = "es_MX.UTF-8"
+    are supported and installed on your system.
+perl: warning: Falling back to the standard locale ("C").
+debconf: unable to initialize frontend: Dialog
+debconf: (No usable dialog-like program is installed, so the dialog based frontend cannot be used. at /usr/share/perl5/Debconf/FrontEnd/Dialog.pm line 79, <STDIN> line 4.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Readline
+debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.40.1 /usr/local/share/perl/5.40.1 /usr/lib/x86_64-linux-gnu/perl5/5.40 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.40 /usr/share/perl/5.40 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8, <STDIN> line 4.)
+debconf: falling back to frontend: Teletype
+Selecting previously unselected package linux-image-6.12.90+deb13.1-amd64.
+(Reading database ... 9716 files and directories currently installed.)
+Preparing to unpack .../linux-image-6.12.90+deb13.1-amd64_6.12.90-2_amd64.deb ...
+Unpacking linux-image-6.12.90+deb13.1-amd64 (6.12.90-2) ...
+Selecting previously unselected package iucode-tool.
+Preparing to unpack .../iucode-tool_2.3.1-3_amd64.deb ...
+Unpacking iucode-tool (2.3.1-3) ...
+Selecting previously unselected package intel-microcode.
+Preparing to unpack .../intel-microcode_3.20251111.1~deb13u1_amd64.deb ...
+Unpacking intel-microcode (3.20251111.1~deb13u1) ...
+Selecting previously unselected package linux-image-amd64.
+Preparing to unpack .../linux-image-amd64_6.12.90-2_amd64.deb ...
+Unpacking linux-image-amd64 (6.12.90-2) ...
+Setting up iucode-tool (2.3.1-3) ...
+Setting up intel-microcode (3.20251111.1~deb13u1) ...
+intel-microcode: microcode will be updated at next boot
+Setting up linux-image-6.12.90+deb13.1-amd64 (6.12.90-2) ...
+I: /vmlinuz.old is now a symlink to boot/vmlinuz-6.12.90+deb13.1-amd64
+I: /initrd.img.old is now a symlink to boot/initrd.img-6.12.90+deb13.1-amd64
+I: /vmlinuz is now a symlink to boot/vmlinuz-6.12.90+deb13.1-amd64
+I: /initrd.img is now a symlink to boot/initrd.img-6.12.90+deb13.1-amd64
+/etc/kernel/postinst.d/initramfs-tools:
+update-initramfs: Generating /boot/initrd.img-6.12.90+deb13.1-amd64
+W: No zstd in /usr/bin:/sbin:/bin, using gzip
+cryptsetup: ERROR: Source mismatch: vroot uses N/A, but 
+    UUID=737600e3-a581-49fa-8b54-2ae945a5bdfe is 8:3
+cryptsetup: WARNING: target 'cryptroot' not found in /etc/crypttab
+device-mapper: table ioctl on vroot  failed: No such device or address
+Command failed.
+cryptsetup: WARNING: Couldn't determine cipher modules to load for vroot
+setupcon is missing. Please install the 'console-setup' package.
+Setting up linux-image-amd64 (6.12.90-2) ...
+Processing triggers for man-db (2.13.1-1) ...
+Processing triggers for initramfs-tools (0.148.4) ...
+update-initramfs: Generating /boot/initrd.img-6.12.90+deb13.1-amd64
+W: No zstd in /usr/bin:/sbin:/bin, using gzip
+cryptsetup: ERROR: Source mismatch: vroot uses N/A, but 
+    UUID=737600e3-a581-49fa-8b54-2ae945a5bdfe is 8:3
+cryptsetup: WARNING: target 'cryptroot' not found in /etc/crypttab
+device-mapper: table ioctl on vroot  failed: No such device or address
+Command failed.
+cryptsetup: WARNING: Couldn't determine cipher modules to load for vroot
+setupcon is missing. Please install the 'console-setup' package.
+
+[SOLUCIÓN 1] 
+
+Analicemos las líneas clave de tu log:
+
+cryptsetup: WARNING: target 'cryptroot' not found in /etc/crypttab
+cryptsetup: ERROR: Source mismatch: vroot uses N/A...
+
+El diagnóstico:
+En el paso anterior te pedí que registraras el contenedor en /etc/crypttab con el nombre genérico vroot. 
+Sin embargo, tu sistema anfitrión abrió originalmente tu partición LUKS bajo el nombre cryptroot (lo vimos en tu
+ salida anterior: /dev/mapper/cryptroot).
+
+Al momento de compilar la imagen de arranque (initrd.img), el script detectó que el sistema de archivos raíz 
+real está corriendo sobre cryptroot y fue a buscar ese nombre al archivo crypttab. Al encontrar vroot en su lugar, 
+el script detuvo la compilación por seguridad acusando un "mismatch" (desajuste).
+
+(Nota: Las advertencias de perl sobre "locale" y la de setupcon son 100% normales en un chroot mínimo y las 
+abordaremos en las fases de configuración final. Los paquetes linux-image e intel-microcode sí se instalaron correctamente).
+
+Vamos a corregir esa línea y a lanzar la consolidación del motor que quedó pendiente.
+
+FASE 7 — PASO 22 (Corrección y Acción 2 de 2)
+
+Vamos a reescribir el archivo crypttab con el nombre de mapeo correcto (cryptroot) e invocaremos 
+manualmente la herramienta de generación del ramdisk para que lea la nueva configuración y parchee el error.
+
+Por favor, ejecuta este bloque de comandos dentro del chroot:
+
+Bash (EJECUTAR POR BLOQUE)
+
+echo "cryptroot UUID=737600e3-a581-49fa-8b54-2ae945a5bdfe none luks,discard,initramfs" > /etc/crypttab && \
+update-initramfs -u -k all
+
+Qué esperar: La configuración se sobrescribirá en silencio y el sistema volverá a generar
+el archivo /boot/initrd.img-6.12.90+deb13.1-amd64. Verás nuevamente la advertencia inofensiva de zstd 
+(usará gzip como respaldo) y quizás la de setupcon, pero los errores fatales de cryptsetup y device-mapper 
+ya no aparecerán.
+
+[RESULTADO]
+
+update-initramfs: Generating /boot/initrd.img-6.12.90+deb13.1-amd64
+W: No zstd in /usr/bin:/sbin:/bin, using gzip
+setupcon is missing. Please install the 'console-setup' package.
+
+[PASS] 90% (SE DEBEN CORREGIR LOS ERRORES EN FUTURAS DOCUMENTAICONES)
+
+============================================================================================================================
+
+FASE 8 — PASO 23: CONFIGURACIÓN DEL HOSTNAME
+Primero, asignaremos el nombre a la máquina. Por favor, ejecuta este comando dentro del chroot 
+(sustituye devuan-core por el nombre que prefieras):
+
+Bash
+
+echo devuan-core > /etc/hostname
+
+
+PASO 23 (Acción 2 de 2)
+
+Vamos a configurar el archivo de resolución local para que el sistema reconozca su propio nombre de host. 
+Por favor, ejecuta este comando dentro del chroot para abrir el editor:
+
+Bash
+
+nano /etc/hosts
+
+                acpid |      default                                        
+             bootlogd |                                              sysinit
+             bootlogs |      default               recovery                 
+          bootmisc.sh |                                              sysinit
+           brightness |                                              sysinit
+              cgroups |                                              sysinit
+           checkfs.sh |                                              sysinit
+ checkroot-bootclean.sh |                                              sysinit
+         checkroot.sh |                                              sysinit
+              connman |      default                                        
+           cryptdisks |                                              sysinit
+     cryptdisks-early |                                              sysinit
+                 dbus |      default                                        
+              elogind |      default                                        
+                eudev |                                              sysinit
+          hostname.sh |                                              sysinit
+           hwclock.sh |                                              sysinit
+                  iwd |      default                                        
+            killprocs |                            recovery                 
+                 kmod |                                              sysinit
+       mount-configfs |                                              sysinit
+ mountall-bootclean.sh |                                              sysinit
+          mountall.sh |                                              sysinit
+     mountdevsubfs.sh |                                              sysinit
+       mountkernfs.sh |                                              sysinit
+ mountnfs-bootclean.sh |                                              sysinit
+          mountnfs.sh |                                              sysinit
+               procps |                                              sysinit
+             rc.local |      default                                        
+            rmnologin |      default                                        
+                rsync |      default                                        
+            savecache |                        off                        acpid |      default                                        
+             bootlogd |                                              sysinit
+             bootlogs |      default               recovery                 
+          bootmisc.sh |                                              sysinit
+           brightness |                                              sysinit
+              cgroups |                                              sysinit
+           checkfs.sh |                                              sysinit
+ checkroot-bootclean.sh |                                              sysinit
+         checkroot.sh |                                              sysinit
+              connman |      default                                        
+           cryptdisks |                                              sysinit
+     cryptdisks-early |                                              sysinit
+                 dbus |      default                                        
+              elogind |      default                                        
+                eudev |                                              sysinit
+          hostname.sh |                                              sysinit
+           hwclock.sh |                                              sysinit
+                  iwd |      default                                        
+            killprocs |                            recovery                 
+                 kmod |                                              sysinit
+       mount-configfs |                                              sysinit
+ mountall-bootclean.sh |                                              sysinit
+          mountall.sh |                                              sysinit
+     mountdevsubfs.sh |                                              sysinit
+       mountkernfs.sh |                                              sysinit
+ mountnfs-bootclean.sh |                                              sysinit
+          mountnfs.sh |                                              sysinit
+               procps |                                              sysinit
+             rc.local |      default                                        
+            rmnologin |      default                                        
+                rsync |      default                                        
+            savecache |                        off                          
+             sendsigs |                        off                          
+               single |                            recovery                 
+        smartmontools |      default                                        
+        stop-bootlogd |      default                                        
+ stop-bootlogd-single |                                              sysinit
+                 sudo |      default                                        
+                 udev |                                              sysinit
+             umountfs |                        off                          
+         umountnfs.sh |                        off                          
+           umountroot |                        off                          
+              urandom |                                              sysinit                  
+             sendsigs |                        off                          
+               single |                            recovery                 
+        smartmontools |      default                                        
+        stop-bootlogd |      default                                        
+ stop-bootlogd-single |                                              sysinit
+                 sudo |      default                                        
+                 udev |                                              sysinit
+             umountfs |                        off                          
+         umountnfs.sh |                        off                          
+           umountroot |                        off                          
+              urandom |                                              sysinit
+[ERROR]
+Error opening terminal: xterm-kitty.
+[SOLUCIÓN] EJECUTAR EN CHROOT: export TERM=xterm
+
+Y asegúrate de que el contenido sea exactamente el siguiente (reemplazando devuan-core si usaste un nombre 
+distinto anteriormente):
+
+
+127.0.0.1       localhost
+127.0.1.1       devuan-core
+
+::1             localhost ip6-localhost ip6-loopback
+ff02::1         ip6-allnodes
+ff02::2         ip6-allrouters
+
+PASO 23 (Verificación)
+Ejecuta estos dos comandos dentro del chroot uno por uno:
+
+Para ver el nombre de equipo:
+
+Bash
+
+cat /etc/hostname
+
+[RESULTADO] devuan-core
+
+Para ver el archivo de hosts:
+
+Bash
+
+cat /etc/hosts
+
+[RESULTADO]
+
+127.0.0.1       localhost
+127.0.1.1       devuan-core
+
+::1             localhost ip6-localhost ip6-loopback
+ff02::1         ip6-allnodes
+ff02::2         ip6-allrouters
+
+PASS [X]
+
+============================================================================================================================
+
+FASE 9 — ZONA HORARIA Y LOCALES (Paso 24)
+Ahora configuraremos el lenguaje y la zona horaria del sistema. Para evitar errores de "locale" que vimos anteriormente 
+en los logs, primero debemos instalar el paquete necesario.
+
+Por favor, ejecuta dentro del chroot:
+
+Bash
+
+apt install --no-install-recommends locales tzdata -y
+
+PASS [X]
+
+=============================================================================================================================
+
+FASE 9 — PASO 25: CONFIGURACIÓN DE ZONA HORARIA
+Ahora vamos a configurar la hora local para que el sistema esté sincronizado. Como estamos en un entorno chroot, 
+lo haremos mediante la herramienta dpkg-reconfigure.
+
+Por favor, ejecuta el siguiente comando dentro del chroot:
+
+Bash
+
+dpkg-reconfigure tzdata
+
+Esto abrirá una interfaz interactiva en tu terminal. Sigue estos pasos:
+
+Selecciona tu área geográfica (probablemente America).
+
+Selecciona tu ciudad o zona horaria específica (por ejemplo, Guatemala).
+
+[RESULTADO]
+
+Current default time zone: 'America/Guatemala'
+Local time is now:      Wed Jun 17 19:19:53 CST 2026.
+Universal Time is now:  Thu Jun 18 01:19:53 UTC 2026.
+
+PASS [X]
+
+=============================================================================================================================
+
+FASE 9 — PASO 26: CONFIGURACIÓN DE LOCALES
+Por favor, ejecuta el siguiente comando dentro del chroot:
+
+Bash
+
+dpkg-reconfigure locales
+
+Pasos a seguir en la interfaz:
+
+Se abrirá una lista larga. Usa la barra espaciadora para marcar es_MX.UTF-8 UTF-8 (o el que prefieras, 
+por ejemplo es_GT.UTF-8 si te es más cómodo). Asegúrate de que el asterisco [*] aparezca junto a la opción.
+
+Presiona Enter para aceptar.
+
+En la siguiente pantalla, selecciona nuevamente es_MX.UTF-8 (o el mismo que elegiste antes) como el "default locale" 
+para el sistema.
+
+Presiona Enter.
+
+
+[RESULTADO]
+
+done
+Generation complete.
+
+============================================================================================================================
+
+FASE 8 — PASO 24: INSTALACIÓN DE OPENRC
+Ejecuta este comando dentro del chroot para instalar el sistema de inicio:
+
+Bash
+
+apt install --no-install-recommends openrc -y
+
+[LOG ENTERO:]
+
+Installing:                     
+  openrc
+
+Installing dependencies:
+  libeinfo1  librc1t64
+
+Suggested packages:
+  policycoreutils
+
+REMOVING:
+  sysv-rc
+
+Summary:
+  Upgrading: 0, Installing: 3, Removing: 1, Not Upgrading: 0
+  Download size: 234 kB
+  Space needed: 1944 kB / 199 GB available
+
+Get:1 http://deb.devuan.org/merged excalibur/main amd64 libeinfo1 amd64 0.56-1 [14.5 kB]
+Get:2 http://deb.devuan.org/merged excalibur/main amd64 librc1t64 amd64 0.56-1 [33.8 kB]
+Get:3 http://deb.devuan.org/merged excalibur/main amd64 openrc amd64 0.56-1 [186 kB]
+Fetched 234 kB in 17s (13.8 kB/s)
+perl: warning: Setting locale failed.
+perl: warning: Please check that your locale settings:
+    LANGUAGE = (unset),
+    LC_ALL = (unset),
+    LC_CTYPE = (unset),
+    LC_NUMERIC = (unset),
+    LC_COLLATE = (unset),
+    LC_TIME = (unset),
+    LC_MESSAGES = (unset),
+    LC_MONETARY = (unset),
+    LC_ADDRESS = (unset),
+    LC_IDENTIFICATION = (unset),
+    LC_MEASUREMENT = (unset),
+    LC_PAPER = (unset),
+    LC_TELEPHONE = (unset),
+    LC_NAME = (unset),
+    LANG = "es_MX.UTF-8"
+    are supported and installed on your system.
+perl: warning: Falling back to the standard locale ("C").
+debconf: unable to initialize frontend: Dialog
+debconf: (No usable dialog-like program is installed, so the dialog based frontend cannot be used. at /usr/share/perl5/Debconf/FrontEnd/Dialog.pm line 79, <STDIN> line 3.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Readline
+debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.40.1 /usr/local/share/perl/5.40.1 /usr/lib/x86_64-linux-gnu/perl5/5.40 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.40 /usr/share/perl/5.40 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8, <STDIN> line 3.)
+debconf: falling back to frontend: Teletype
+Selecting previously unselected package libeinfo1:amd64.
+(Reading database ... 15738 files and directories currently installed.)
+Preparing to unpack .../libeinfo1_0.56-1_amd64.deb ...
+Unpacking libeinfo1:amd64 (0.56-1) ...
+Selecting previously unselected package librc1t64:amd64.
+Preparing to unpack .../librc1t64_0.56-1_amd64.deb ...
+Adding 'diversion of /lib/x86_64-linux-gnu/librc.so.1 to /lib/x86_64-linux-gnu/librc.so.1.usr-is-merged by librc1t64'
+Unpacking librc1t64:amd64 (0.56-1) ...
+dpkg: sysv-rc: dependency problems, but removing anyway as you requested:
+ sysvinit-core depends on sysv-rc | openrc | file-rc; however:
+  Package sysv-rc is to be removed.
+  Package openrc is not installed.
+  Package file-rc is not installed.
+ initscripts depends on sysv-rc | file-rc | openrc; however:
+  Package sysv-rc is to be removed.
+  Package file-rc is not installed.
+  Package openrc is not installed.
+
+(Reading database ... 15751 files and directories currently installed.)
+Removing sysv-rc (3.14-4devuan1) ...
+Selecting previously unselected package openrc.
+(Reading database ... 15725 files and directories currently installed.)
+Preparing to unpack .../openrc_0.56-1_amd64.deb ...
+Unpacking openrc (0.56-1) ...
+Setting up libeinfo1:amd64 (0.56-1) ...
+Setting up librc1t64:amd64 (0.56-1) ...
+Removing 'diversion of /lib/x86_64-linux-gnu/librc.so.1 to /lib/x86_64-linux-gnu/librc.so.1.usr-is-merged by librc1t64'
+Setting up openrc (0.56-1) ...
+Add existing services ...
+ * service bootlogs added to runlevel recovery
+ * service killprocs added to runlevel recovery
+ * service single added to runlevel recovery
+ * service bootlogs added to runlevel default
+ * service rsync added to runlevel default
+ * service sudo added to runlevel default
+ * service rmnologin added to runlevel default
+ * service rc.local added to runlevel default
+ * service stop-bootlogd added to runlevel default
+ * service mountkernfs.sh added to runlevel sysinit
+ * service eudev added to runlevel sysinit
+ * service mountdevsubfs.sh added to runlevel sysinit
+ * service udev added to runlevel sysinit
+ * service bootlogd added to runlevel sysinit
+ * service hostname.sh added to runlevel sysinit
+ * service hwclock.sh added to runlevel sysinit
+ * service checkroot.sh added to runlevel sysinit
+ * service cryptdisks-early added to runlevel sysinit
+ * service cryptdisks added to runlevel sysinit
+ * service checkfs.sh added to runlevel sysinit
+ * service checkroot-bootclean.sh added to runlevel sysinit
+ * service kmod added to runlevel sysinit
+ * service mount-configfs added to runlevel sysinit
+ * service mountall.sh added to runlevel sysinit
+ * service mountall-bootclean.sh added to runlevel sysinit
+ * service brightness added to runlevel sysinit
+ * service procps added to runlevel sysinit
+ * service stop-bootlogd-single added to runlevel sysinit
+ * service urandom added to runlevel sysinit
+ * service mountnfs.sh added to runlevel sysinit
+ * service mountnfs-bootclean.sh added to runlevel sysinit
+ * service bootmisc.sh added to runlevel sysinit
+ * service sendsigs added to runlevel off
+ * service umountnfs.sh added to runlevel off
+ * service umountfs added to runlevel off
+ * service umountroot added to runlevel off
+ * service savecache added to runlevel off
+ * service cgroups added to runlevel sysinit
+ * Caching service dependencies ...
+Error: udev is the name of a real and virtual service.                                                                                     [ ok ]
+**********************************************************************
+*** WARNING: if you are replacing sysv-rc by OpenRC, then you must ***
+*** reboot immediately using the following command:                ***
+for file in /etc/rc0.d/K*; do s=`basename $(readlink "$file")` ; /etc/init.d/$s stop; done
+**********************************************************************
+Processing triggers for man-db (2.13.1-1) ...
+Processing triggers for libc-bin (2.41-12+deb13u3) ...
+
+[COMPLETADO]
+
+=============================================================================================================================
+
+FASE 9 — GESTIÓN DE HARDWARE, DISPOSITIVOS Y SESIONES
+Continuamos con la hoja de ruta. Necesitamos instalar los servicios que permitirán que OpenRC gestione el hardware y 
+las sesiones de usuario correctamente.
+
+Ejecuta este comando dentro del chroot:
+
+Bash
+
+apt install --no-install-recommends dbus elogind udev kmod acpid -y
+
+[COMPLETADO]
+
+============================================================================================================================
+
+FASE 10 — ARQUITECTURA DE RED
+Ahora vamos a instalar el stack de red minimalista pero potente que definiste: connman para la gestión de
+conexiones y iwd para el backend inalámbrico.
+
+Ejecuta el siguiente comando dentro del chroot:
+
+Bash
+
+apt install --no-install-recommends connman iwd iw wireless-regdb ethtool nftables -y
+
+[COMPLETADO]
+
+=============================================================================================================================
+
+FASE 11 — INFRAESTRUCTURA DE ALMACENAMIENTO Y FIRMWARE
+Ahora instalaremos las herramientas base para el sistema de archivos y el firmware necesario para el hardware (especialmente para la parte inalámbrica y gráfica).
+
+Ejecuta este comando dentro del chroot:
+
+Bash
+
+apt install --no-install-recommends \
+e2fsprogs dosfstools parted gdisk smartmontools \
+firmware-linux-free firmware-intel-graphics \
+firmware-misc-nonfree firmware-realtek \
+locales -y
+
+[COMPLETADO]
+[RESULTADO]
+update-initramfs: Generating /boot/initrd.img-6.12.90+deb13.1-amd64
+W: No zstd in /usr/bin:/sbin:/bin, using gzip
+setupcon is missing. Please install the 'console-setup' package.
+
+=============================================================================================================================
+
+FASE 14 — CONTROL DE ACCESO RAÍZ (ROOT)
+Es momento de establecer la contraseña de seguridad para el usuario root. Ejecuta este comando dentro del chroot:
+
+Bash
+
+passwd root
+
+Introduce la contraseña dos veces cuando el sistema te lo solicite.
+
+PASS [X]
+
+============================================================================================================================
+
+FASE 15 — APROVISIONAMIENTO DEL USUARIO OPERADOR
+Vamos a crear a aldodevuan y establecer su contraseña para que tengas acceso como usuario con privilegios controlados. .
+
+Ejecuta este comando dentro del chroot:
+
+Bash
+
+useradd -m -s /bin/bash aldodevuan && passwd aldodevuan
+(DEVUANCORE) CONTRASEÑA ESCRITA EN MAYÚSCULAS
+
+PASS [X]
+=============================================================================================================================
+
+FASE 16 — ENDURECIMIENTO DE PRIVILEGIOS (SUDOERS)
+Primero, otorgamos privilegios de superusuario al operador:
+
+Bash
+
+usermod -aG sudo aldodevuan
+
+Ahora, inyectamos la política de seguridad personalizada para el timeout de sudo y los permisos:
+
+Bash
+
+cat << 'EOF' > /etc/sudoers.d/90-hardened-operator
+Defaults env_reset, timestamp_timeout=5
+aldodevuan ALL=(ALL:ALL) ALL
+EOF
+
+BASH
+
+chmod 0440 /etc/sudoers.d/90-hardened-operator
+
+Finalmente, validamos la sintaxis para asegurar que no haya errores:
+
+Bash
+
+visudo -c
+
+[RESULTADO]
+
+/etc/sudoers: parsed OK
+/etc/sudoers.d/90-hardened-operator: parsed OK
+/etc/sudoers.d/README: parsed OK
+
+
+=============================================================================================================================
+FASE 17 — CONFIGURACIÓN DE ALMACENAMIENTO ESTÁTICO (FSTAB)
+Ahora definiremos los puntos de montaje. Como mencionaste, es necesario obtener los UUIDs correctos. 
+Si no tienes los valores a mano, puedes ejecutar blkid en otra terminal del Host
+para identificar tu partición raíz y la partición EFI.
+
+Una vez tengas los UUIDs, ejecuta este bloque dentro del chroot (sustituyendo los valores de ejemplo por los tuyos):
+
+[BASH]
+
+BLKID
+
+[RESULTADO]
+
+/dev/sda2: UUID="2585269f-52d7-4005-9beb-8a445b9bef3e" BLOCK_SIZE="4096" TYPE="ext4" PARTUUID="fbe96c8c-c23b-42f0-a0cd-75bee475d281"
+/dev/sda3: UUID="737600e3-a581-49fa-8b54-2ae945a5bdfe" TYPE="crypto_LUKS" PARTUUID="6168f870-bbc4-4192-b54c-e956234e8e5c"
+/dev/sda1: SEC_TYPE="msdos" UUID="E1A7-C5A6" BLOCK_SIZE="512" TYPE="vfat" PARTUUID="9d42001c-7cef-46a3-bd42-af89081f4563"
+/dev/mapper/cryptroot: UUID="174da814-b2c2-48a4-b4bc-662af1a63610" BLOCK_SIZE="4096" TYPE="ext4"
+
+como estás usando LUKS, tu partición raíz montada en / no es sda3 (que es el contenedor cifrado), sino /dev/mapper/cryptroot.
+
+Vamos a corregir el fstab con los UUIDs correctos para tu configuración.
+
+CONFIGURACIÓN DE FSTAB
+Ejecuta esto dentro del chroot para escribir el fstab con los valores correctos de tu sistema cifrado:
+
+Bash
+
+cat << 'EOF' > /etc/fstab
+# <file system>                          <mount point>   <type>  <options>                       <dump>  <pass>
+# Raíz del Sistema (vía Mapeador LUKS)
+UUID=174da814-b2c2-48a4-b4bc-662af1a63610  /               ext4    noatime,errors=remount-ro       0       1
+
+# Partición de Arranque UEFI
+UUID=E1A7-C5A6                           /boot/efi       vfat    noatime,nodev,nosuid,noexec,umask=0077  0       2
+
+# Sistemas de archivos virtuales standard
+proc                                     /proc           proc    defaults                        0       0
+EOF
+
+[VERIFICACIÓN]
+
+cat /etc/fstab
+
+[RESULTADO]
+
+# <file system>                          <mount point>   <type>  <options>                       <dump>  <pass>
+# Raíz del Sistema (vía Mapeador LUKS)
+UUID=174da814-b2c2-48a4-b4bc-662af1a63610  /               ext4    noatime,errors=remount-ro       0       1
+
+# Partición de Arranque UEFI
+UUID=E1A7-C5A6                           /boot/efi       vfat    noatime,nodev,nosuid,noexec,umask=0077  0       2
+
+# Sistemas de archivos virtuales standard
+proc                                     /proc           proc    defaults                        0       0
+
+[COMPLETE]
+
+============================================================================================================================
+
+FASE 18 — ORQUESTACIÓN DE SERVICIOS CRÍTICOS (OPENRC)
+Ejecuta los siguientes comandos dentro del chroot para activar los demonios de gestión de hardware y red 
+que instalamos previamente:
+
+Bash
+
+rc-update add dbus default
+
+rc-update add elogind default
+
+rc-update add connman default
+
+rc-update add iwd default
+
+Una vez ejecutados, verifica que todo esté en su lugar con:
+
+Bash
+
+rc-update show
+
+[RESULTADO]
+
+                acpid |      default                                        
+             bootlogd |                                              sysinit
+             bootlogs |      default               recovery                 
+          bootmisc.sh |                                              sysinit
+           brightness |                                              sysinit
+              cgroups |                                              sysinit
+           checkfs.sh |                                              sysinit
+ checkroot-bootclean.sh |                                              sysinit
+         checkroot.sh |                                              sysinit
+              connman |      default                                        
+           cryptdisks |                                              sysinit
+     cryptdisks-early |                                              sysinit
+                 dbus |      default                                        
+              elogind |      default                                        
+                eudev |                                              sysinit
+          hostname.sh |                                              sysinit
+           hwclock.sh |                                              sysinit
+                  iwd |      default                                        
+            killprocs |                            recovery                 
+                 kmod |                                              sysinit
+       mount-configfs |                                              sysinit
+ mountall-bootclean.sh |                                              sysinit
+          mountall.sh |                                              sysinit
+     mountdevsubfs.sh |                                              sysinit
+       mountkernfs.sh |                                              sysinit
+ mountnfs-bootclean.sh |                                              sysinit
+          mountnfs.sh |                                              sysinit
+               procps |                                              sysinit
+             rc.local |      default                                        
+            rmnologin |      default                                        
+                rsync |      default                                        
+            savecache |                        off                          
+             sendsigs |                        off                          
+               single |                            recovery                 
+        smartmontools |      default                                        
+        stop-bootlogd |      default                                        
+ stop-bootlogd-single |                                              sysinit
+                 sudo |      default                                        
+                 udev |                                              sysinit
+             umountfs |                        off                          
+         umountnfs.sh |                        off                          
+           umountroot |                        off                          
+              urandom |                                              sysinit
+
+
+[COMPLETE]
+============================================================================================================================
+
+FASE ADICIONAL LUKS (Configuración del Cifrado)
+Dado que tu partición raíz es un contenedor LUKS (/dev/mapper/cryptroot), debemos asegurarnos de que el sistema pueda descifrarlo en el arranque antes de intentar montar /.
+
+Instala los paquetes necesarios dentro del chroot:
+
+Bash
+
+apt install cryptsetup-initramfs -y
+
+[COMPLETE]
+Configura el archivo /etc/crypttab:
+
+Necesitamos decirle al sistema qué dispositivo debe abrir. Ejecuta lo siguiente para crear el archivo 
+(ajustando el UUID al de tu partición física /dev/sda3, que es la que contiene el LUKS):
+
+Bash
+
+echo "cryptroot UUID=737600e3-a581-49fa-8b54-2ae945a5bdfe none luks" > /etc/crypttab
+[COMPLETE]
+
+Actualiza el initramfs para incluir los módulos de cifrado:
+
+Bash
+
+update-initramfs -u -k all
+
+[RESULTADO]
+update-initramfs: Generating /boot/initrd.img-6.12.90+deb13.1-amd64
+W: No zstd in /usr/bin:/sbin:/bin, using gzip
+setupcon is missing. Please install the 'console-setup' package.
+
+============================================================================================================================
+
+FASE O0 — OBSERVABILIDAD MÍNIMA
+
+Antes de salir, instalemos tus herramientas de auditoría:
+
+Bash
+
+apt install htop iotop iftop ncdu -y
+
+[COMPLETE]
+
+============================================================================================================================
+
+FASE O1 — TMPFS TEMPORAL (RENDIMIENTO EN RAM)
+
+Para optimizar el uso del almacenamiento y reducir escrituras:
+
+Bash
+
+cat << 'EOF' >> /etc/fstab
+# Volatilización de temporales (v2.1)
+tmpfs /tmp     tmpfs defaults,noatime,nosuid,nodev 0 0
+tmpfs /var/tmp tmpfs defaults,noatime,nosuid,nodev 0 0
+EOF
+
+=============================================================================================================================
+
+FASE 19 — GESTOR DE ARRANQUE (DELEGADO AL HOST)
+Ejecuta esto dentro del chroot para salir y realizar el desmontaje seguro:
+
+Bash
+# Salir del entorno chroot
+
+exit
+
+sync
+
+# Desmontar todo de forma segura
+
+sudo umount -R /mnt/devuan/dev
+
+sudo umount -R /mnt/devuan/sys
+
+sudo umount /mnt/devuan/proc
+
+sudo umount /mnt/devuan/run
+
+sudo umount /mnt/devuan/boot/efi
+
+sudo umount /mnt/devuan
+
+[VERIFICACIÓN]
+
+mount | grep devuan (VACÍO)
+
+[COMPLETE]
+
+=============================================================================================================================
+
+PASO FINAL EN EL HOST (antiX)
+
+Ahora, estando en tu terminal de antiX, debemos actualizar el GRUB para que detecte la nueva instalación de Devuan
+y la añada al menú de inicio:
+
+Bash
+
+sudo update-grub
+
+[RESULTADO ESPERADO]: Deberías ver en la salida del comando algo como: "Found Devuan GNU/Linux 6 (excalibur) on /dev/sda3".
+
+[RESULTADO]
+
+Generating grub configuration file ...
+Found background: /usr/share/wallpaper/grub/back.png
+Found background image: /usr/share/wallpaper/grub/back.png
+Found linux image: /boot/vmlinuz-6.6.119-antix.1-amd64-smp
+Found initrd image: /boot/initrd.img-6.6.119-antix.1-amd64-smp
+Found mtest-64.efi image: /boot/uefi-mt/mtest-64.efi
+Warning: os-prober will be executed to detect other bootable partitions.
+Its output will be used to detect bootable binaries on them and create new boot entries.
+Adding boot menu entry for UEFI Firmware Settings ...
+done
+
+=============================================================================================================================
+AUDITORÍA OPERATIVA INICIAL (EJECUTAR EN EL PRIMER ARRANQUE REAL)
+=============================================================================
+[ ] ip a
+[ ] ping -c 3 1.1.1.1
+[ ] dig deb.devuan.org
+[ ] lspci
+[ ] lsusb
+[ ] rc-status -s
+[ ] connmanctl state
+[ ] dmesg | grep -iE "error|failed"
+[ ] uname -r
+[ ] loginctl
+
+# [RESULTADO ESPERADO]: Servicios base en [ started ]. Interfaces de red operativas.
+
+# No se descubrió la entrada grub: DEVUAN CORE 2.1 LUKS
+ADENDA DE CERTIFICACIÓN DE LABORATORIO
+
+INCIDENTE:
+FALLO DE ARRANQUE EFI EN INSTALACIÓN LUKS
+
+ESTADO:
+RESUELTO Y DOCUMENTADO
+
+FECHA:
+CERTIFICACIÓN REAL EN LABORATORIO
+
+====================================================================
+RESUMEN EJECUTIVO
+=================
+
+Tras finalizar la construcción completa de Devuan Core 2.1 con
+partición raíz cifrada mediante LUKS, el sistema no aparecía en el
+menú de arranque UEFI.
+
+El síntoma inicial sugería una instalación incompleta o corrupta.
+
+La auditoría posterior demostró que:
+
+* Devuan estaba correctamente instalado.
+* El kernel existía.
+* El initramfs existía.
+* LUKS funcionaba correctamente.
+* OpenRC estaba instalado.
+* La raíz del sistema era funcional.
+
+El problema real se encontraba exclusivamente en la capa EFI/GRUB.
+
+====================================================================
+INCIDENTE #1
+ESTRATEGIA "DELEGAR GRUB AL HOST"
+=================================
+
+HIPÓTESIS ORIGINAL
+
+La versión inicial de Devuan Core 2.1 asumía que:
+
+1. Devuan se instalaría dentro de LUKS.
+2. El sistema anfitrión (AntiX) ejecutaría update-grub.
+3. os-prober detectaría automáticamente Devuan.
+4. El firmware arrancaría Devuan mediante la entrada generada.
+
+RESULTADO REAL
+
+El comando:
+
+update-grub
+
+generó únicamente entradas para AntiX.
+
+No apareció ninguna referencia a Devuan.
+
+SALIDA OBSERVADA
+
+Found linux image: /boot/vmlinuz-6.6.119-antix...
+Found initrd image: /boot/initrd.img...
+
+No apareció ninguna línea:
+
+Found Devuan GNU/Linux
+
+INVESTIGACIÓN
+
+Se abrió el contenedor LUKS manualmente:
+
+cryptsetup open /dev/sda3 cryptroot
+
+Posteriormente:
+
+mount /dev/mapper/cryptroot /mnt
+
+Auditoría:
+
+ls /mnt
+
+Resultado:
+
+Sistema completo presente.
+
+Auditoría de kernel:
+
+ls /mnt/boot
+
+Resultado:
+
+vmlinuz-6.12.90+deb13.1-amd64
+initrd.img-6.12.90+deb13.1-amd64
+
+Kernel presente.
+
+Initramfs presente.
+
+Sistema operativo válido.
+
+CAUSA RAÍZ
+
+os-prober no detecta instalaciones LUKS que no posean un cargador EFI
+propio instalado.
+
+Devuan jamás había instalado GRUB.
+
+CONCLUSIÓN
+
+La estrategia:
+
+"Delegar GRUB al Host"
+
+NO es válida para instalaciones:
+
+EFI + LUKS + Devuan
+
+CORRECCIÓN CERTIFICADA
+
+Instalar GRUB dentro del chroot.
+
+====================================================================
+INCIDENTE #2
+GRUB NO INSTALADO
+=================
+
+AUDITORÍA
+
+Dentro del chroot:
+
+dpkg -l | grep grub
+
+Resultado:
+
+(sin salida)
+
+Interpretación:
+
+No existía ningún paquete GRUB instalado.
+
+CORRECCIÓN
+
+Instalar:
+
+apt install 
+grub-efi-amd64 
+grub-efi-amd64-bin 
+efibootmgr
+
+Resultado:
+
+ii grub-common
+ii grub-efi-amd64
+ii grub-efi-amd64-bin
+ii grub-efi-amd64-unsigned
+ii grub2-common
+
+GRUB instalado correctamente.
+
+====================================================================
+INCIDENTE #3
+CHROOT INCOMPLETO
+=================
+
+SÍNTOMA
+
+Intento de ejecución:
+
+grub-install
+
+Resultado:
+
+cannot find a device for /boot/efi
+
+INVESTIGACIÓN
+
+Dentro del chroot:
+
+ls /dev/sda*
+
+Resultado:
+
+No such file or directory
+
+CAUSA
+
+El entorno chroot fue reconstruido únicamente montando:
+
+mount /dev/mapper/cryptroot /mnt
+
+No existían:
+
+/dev
+/dev/pts
+/proc
+/sys
+/run
+
+GRUB era incapaz de identificar discos físicos.
+
+CORRECCIÓN
+
+Reconstrucción completa:
+
+mount --bind /dev /mnt/dev
+mount --bind /dev/pts /mnt/dev/pts
+mount --bind /proc /mnt/proc
+mount --bind /sys /mnt/sys
+mount --bind /run /mnt/run
+
+Validación:
+
+ls /dev/sda*
+
+Resultado:
+
+/dev/sda
+/dev/sda1
+/dev/sda2
+/dev/sda3
+
+Problema resuelto.
+
+====================================================================
+INCIDENTE #4
+CRYPTODISK NO HABILITADO
+========================
+
+SÍNTOMA
+
+Ejecución:
+
+grub-install
+
+Resultado:
+
+attempt to install to encrypted disk without
+cryptodisk enabled
+
+CAUSA
+
+GRUB detectó correctamente LUKS.
+
+Sin embargo, no estaba configurado para descifrar
+volúmenes cifrados durante el arranque.
+
+CORRECCIÓN CERTIFICADA
+
+Editar:
+
+/etc/default/grub
+
+Añadir:
+
+GRUB_ENABLE_CRYPTODISK=y
+
+Validación:
+
+grep CRYPTODISK /etc/default/grub
+
+Resultado:
+
+GRUB_ENABLE_CRYPTODISK=y
+
+====================================================================
+INSTALACIÓN EFI EXITOSA
+=======================
+
+Ejecución:
+
+grub-install 
+--target=x86_64-efi 
+--efi-directory=/boot/efi 
+--bootloader-id=Devuan
+
+Resultado:
+
+Installation finished.
+No error reported.
+
+====================================================================
+VALIDACIÓN EFI
+==============
+
+Auditoría:
+
+ls /boot/efi/EFI
+
+Resultado:
+
+BOOT
+Devuan
+antix-26-core
+
+Posteriormente:
+
+ls /boot/efi/EFI/Devuan
+
+Resultado:
+
+grubx64.efi
+
+Confirmación:
+
+El cargador EFI fue desplegado correctamente.
+
+====================================================================
+GENERACIÓN DE CONFIGURACIÓN
+===========================
+
+Ejecución:
+
+update-grub
+
+Resultado:
+
+Found linux image:
+Found initrd image:
+done
+
+Configuración GRUB generada exitosamente.
+
+====================================================================
+CORRECCIONES OFICIALES PARA DEVUAN CORE 2.2
+===========================================
+
+ELIMINAR
+
+Fase 19:
+"Delegar GRUB al Host"
+
+REEMPLAZAR POR
+
+Instalar:
+
+apt install 
+grub-efi-amd64 
+grub-efi-amd64-bin 
+efibootmgr
+
+Configurar:
+
+GRUB_ENABLE_CRYPTODISK=y
+
+Instalar EFI:
+
+grub-install 
+--target=x86_64-efi 
+--efi-directory=/boot/efi 
+--bootloader-id=Devuan
+
+Generar menú:
+
+update-grub
+
+====================================================================
+ESTADO FINAL
+============
+
+LUKS
+[PASS]
+
+Kernel
+[PASS]
+
+Initramfs
+[PASS]
+
+GRUB EFI
+[PASS]
+
+Cryptodisk
+[PASS]
+
+EFI/Devuan/grubx64.efi
+[PASS]
+
+Configuración GRUB
+[PASS]
+
+CERTIFICACIÓN
+
+La instalación Devuan Core 2.1 LUKS quedó validada a nivel de:
+
+* Sistema raíz
+* Cifrado
+* Kernel
+* Initramfs
+* EFI
+* GRUB
+
+Pendiente únicamente:
+
+PRIMER ARRANQUE REAL Y VALIDACIÓN POST-BOOT.
+
+Perfecto. Antes de reiniciar, hagamos un cierre limpio para no dejar ningún montaje colgando.
+
+1. Salir del chroot
+
+Si todavía estás dentro:
+
+exit
+2. Sincronizar escrituras pendientes
+sync
+
+Espera unos segundos.
+
+3. Verificar qué sigue montado
+mount | grep /mnt
+
+Muéstrame el resultado si aparecen varias líneas.
+
+4. Desmontar pseudo-sistemas
+
+Si usaste /mnt como raíz del chroot:
+
+sudo umount /mnt/dev/pts
+sudo umount /mnt/dev
+sudo umount /mnt/proc
+sudo umount /mnt/sys
+sudo umount /mnt/run
+
+Si alguno responde que no está montado, no pasa nada.
+
+5. Desmontar EFI y raíz
+sudo umount /mnt/boot/efi
+sudo umount /mnt
+6. Cerrar el contenedor LUKS
+
+Comprueba primero:
+
+ls /dev/mapper
+
+Si aparece cryptroot:
+
+sudo cryptsetup close cryptroot
+
+7. Validación final
+
+mount | grep /mnt
+
+Debe devolver silencio.
+
+Y:
+
+ls /dev/mapper
+
+Debería mostrar solamente:
+
+control
+
+Cuando esas dos verificaciones estén limpias, entonces:
+
+reboot
+
+Conclusión técnica
+
+Has resuelto dos incidencias que merecen quedar documentadas en la guía Devuan Core 2.1:
+
+Incidencia DC21-001
+
+GRUB EFI instalado pero sin entrada NVRAM
+
+Síntoma:
+
+update-grub no detecta Devuan
+
+Causa:
+
+grub-install ejecutado desde chroot
+sin acceso de escritura a EFI variables
+
+Solución:
+
+mount -o remount,rw /sys/firmware/efi/efivars
+
+efibootmgr -c -d /dev/sda -p 1 \
+-L "Devuan" \
+-l '\EFI\Devuan\grubx64.efi'
+Incidencia DC21-002
+
+Instalación EFI sobre raíz cifrada LUKS
+
+Síntoma:
+
+attempt to install to encrypted disk
+without cryptodisk enabled
+
+Solución:
+
+Agregar en:
+
+/etc/default/grub
+
+la línea:
+
+GRUB_ENABLE_CRYPTODISK=y
+
+antes de ejecutar:
+
+grub-install
+
+
+=============================================================================================================================
+FASE 21 — CRITERIOS DE CERTIFICACIÓN DEVUAN CORE 2.1
+====================================================
+[ ] Bootstrap reproducible
+[ ] Chroot funcional sin fugas de memoria
+[ ] OpenRC operativo (dbus, elogind, connman, iwd en runlevel default)
+[ ] Red funcional (Connman + IWD operando juntos sin wpa_supplicant)
+[ ] Firmware realtek validado (Sin errores rtl8168e en dmesg)
+[ ] Reglas de Sudoers validadas mediante visudo -c
+[ ] Política APT y DPKG verificadas (`99lean` y `01_nodoc`)
+[ ] Almacenamiento optimizado (noatime y tmpfs activos en /tmp)
+[ ] Logs persistentes intactos
+[ ] Reinicios múltiples exitosos desde el GRUB del Host
+[ ] LUKS validado con solicitud de contraseña funcional (si aplica)
+
+=============================================================================================================================
+RESULTADO FINAL:
+DEVUAN CORE 2.1 CERTIFICADO (RC1)
+=============================================================================================================================
+FIN DEL DOCUMENTO
+
+
